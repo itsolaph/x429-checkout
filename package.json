@@ -1,0 +1,32 @@
+{
+  "name": "x429-checkout",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "x429 Checkout: HTTP 429 with a price. Agents pay waiting agents in USDC on Base (x402) to move ahead in a rate-limited API queue.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "abi": "node scripts/export-abi.mjs",
+    "build:contracts": "forge build --root contracts",
+    "build:web": "node web/build.mjs",
+    "server": "node server/src/main.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:contracts": "forge test --root contracts",
+    "test:server": "node --test server/test/",
+    "e2e": "bash scripts/e2e-local.sh",
+    "mcp:smoke": "bash scripts/mcp-smoke.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "viem": "2.57.7",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

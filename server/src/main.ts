@@ -1,0 +1,57 @@
+// Entry point: node server/src/main.ts (configuration from env, see .env.example).
+import { resolve } from "node:path";
+import { createApp } from "./app.ts";
+import { Relayer, makePublicClient } from "./chain.ts";
+import { Checkout } from "./checkout.ts";
+import { loadConfig } from "./config.ts";
+import { Feed } from "./feed.ts";
+import { Gate } from "./gate.ts";
+import { toJson } from "./json.ts";
+import { QueueReader } from "./queue.ts";
+
+const cfg = loadConfig();
+const log = (entry: Record<string, unknown>) => {
+  const line = { t: new Date().toISOString(), ...entry };
+  console.log(cfg.logJson ? toJson(line) : Object.entries(line).map(([k, v]) => `${k}=${typeof v === "bigint" ? v : JSON.stringify(v)}`).join(" "));
+};
+
+const client = makePublicClient(cfg);
+const chainId = await client.getChainId();
+if (chainId !== cfg.chainId) throw new Error(`RPC is chain ${chainId}, expected ${cfg.chainId}`);
+
+const relayer = cfg.operatorKey ? new Relayer(client, cfg.operatorKey, cfg.contract) : undefined;
+const reader = new QueueReader(client, cfg.contract, cfg.queueId, cfg.pollMs);
+const snap = await reader.get(0);
+if (relayer && snap.operator.toLowerCase() !== relayer.address.toLowerCase()) {
+  throw new Error(`operator key ${relayer.address} is not the operator of queue ${cfg.queueId} (${snap.operator})`);
+}
+
+const checkout = new Checkout(cfg, client, reader, relayer, log);
+const gate = new Gate(checkout, log);
+const feed = new Feed(client, cfg.contract, cfg.queueId, cfg.deployBlock);
+const server = createApp({ checkout, gate, feed, log, siteDir: cfg.siteDir ? resolve(cfg.siteDir) : undefined });
+
+setInterval(() => void reader.refresh().catch(() => {}), cfg.pollMs);
+gate.start();
+feed.start(cfg.pollMs);
+server.listen(cfg.port, cfg.host, () => {
+  log({
+    evt: "listening",
+    url: cfg.publicUrl,
+    chainId,
+    contract: cfg.contract,
+    queueId: cfg.queueId,
+    operator: relayer?.address ?? null,
+    serviceIntervalMs: cfg.serviceIntervalMs,
+    admissionRoundMs: cfg.minQueueMs,
+  });
+});
+
+const shutdown = () => {
+  gate.stop();
+  feed.stop();
+  server.close();
+  setTimeout(() => process.exit(0), 200).unref();
+};
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

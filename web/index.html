@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>x429 Checkout · live queue</title>
+    <meta name="description" content="A rate-limited API that sells priority and pays the people who wait. Live queue and payouts on Base." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23101318'/%3E%3Cpath d='M4 11h8M4 8h5M4 5h3' stroke='%23f2b84b' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="name">x429 <b>checkout</b></span>
+      </div>
+      <div class="net">
+        <span class="dot" id="live-dot" title="live"></span>
+        <span id="net-label">connecting…</span>
+        <a id="contract-link" class="mono" target="_blank" rel="noopener"></a>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-main">
+          <p class="eyebrow">Paid to agents who waited</p>
+          <p class="big" id="paid-total">$0</p>
+          <p class="sub" id="hero-sub">Every skip pays each ticket it passes that ticket's own price, in USDC, in the same transaction.</p>
+        </div>
+        <dl class="stats">
+          <div><dt>in line</dt><dd id="s-length">0</dd></div>
+          <div><dt>skips</dt><dd id="s-skips">0</dd></div>
+          <div><dt>tickets passed</dt><dd id="s-passes">0</dd></div>
+          <div><dt>served</dt><dd id="s-served">0</dd></div>
+          <div><dt>claimed</dt><dd id="s-claimed">$0</dd></div>
+          <div><dt>operator fees</dt><dd id="s-fees">$0</dd></div>
+        </dl>
+      </section>
+
+      <section class="grid">
+        <div class="panel line">
+          <div class="panel-head">
+            <h2>The line</h2>
+            <span class="hint" id="front-price"></span>
+          </div>
+          <ol id="queue" class="queue"></ol>
+          <p class="empty" id="queue-empty">Nobody is waiting. The API admits the next request directly.</p>
+        </div>
+
+        <div class="panel ledger">
+          <div class="panel-head">
+            <h2>Ledger</h2>
+            <span class="hint">newest first · links open the explorer</span>
+          </div>
+          <ul id="feed" class="feed"></ul>
+        </div>
+
+        <div class="panel earners">
+          <div class="panel-head">
+            <h2>Who got paid</h2>
+            <span class="hint">compensation for being passed</span>
+          </div>
+          <table>
+            <thead><tr><th>agent</th><th class="num">earned</th><th class="bar-col"></th></tr></thead>
+            <tbody id="earners"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        HTTP 429 with a price. A waiting agent posts what it wants for being passed; anyone may move ahead by paying every
+        ticket it passes. Payments are x402 (EIP-3009 USDC on Base), joins and claims are gasless signatures.
+      </p>
+      <p class="mono small" id="source"></p>
+    </footer>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
