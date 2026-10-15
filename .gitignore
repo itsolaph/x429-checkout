@@ -1,0 +1,13 @@
+node_modules/
+.env.local
+.env
+.e2e/
+*.log
+
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+/cache/
+
+# built dashboard
+site/
