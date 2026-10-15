@@ -27,6 +27,8 @@ export type Config = {
   /** How long a quote's ceiling is honoured (covers the passkey approval). */
   quoteTtlS: number;
   suggestedSkipPrice: bigint;
+  /** Relayed joins per minute per client IP (each costs the operator gas). */
+  joinsPerMinute: number;
   pollMs: number;
   deployBlock: bigint;
   siteDir: string | undefined;
@@ -83,6 +85,7 @@ export function loadConfig(): Config {
     paymentTimeoutS: int("X429_PAYMENT_TIMEOUT_S", 120),
     quoteTtlS: int("X429_QUOTE_TTL_S", 600),
     suggestedSkipPrice: usdc(env("X429_SUGGESTED_SKIP_PRICE", "0.005")),
+    joinsPerMinute: int("X429_JOINS_PER_MINUTE", 30),
     pollMs: int("X429_POLL_MS", 1_000),
     deployBlock: BigInt(env("X429_DEPLOY_BLOCK", "0")),
     siteDir: process.env.X429_SITE_DIR || undefined,

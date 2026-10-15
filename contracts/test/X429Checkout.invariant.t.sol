@@ -24,6 +24,8 @@ contract Handler is Test {
     bool public ghostUnderpaid;
     /// Set if a payer was charged anything other than (sum of passed prices + fee).
     bool public ghostOvercharged;
+    /// Set if anyone but the operator managed to relay a join.
+    bool public ghostAccessBroken;
     uint256 public ghostSkips;
     uint256 public ghostFrontRuns;
 
@@ -50,17 +52,22 @@ contract Handler is Test {
     function join(uint256 who, uint128 price) external {
         who = bound(who, 0, actors.length - 1);
         price = uint128(bound(price, 0, 50_000));
-        vm.prank(actors[who]);
-        checkout.join(qid, price);
-    }
-
-    function joinWithSig(uint256 who, uint128 price) external {
-        who = bound(who, 0, actors.length - 1);
-        price = uint128(bound(price, 0, 50_000));
         bytes32 nonce = bytes32(++nonceCounter);
         uint256 deadline = block.timestamp + 60;
         bytes memory sig = Signatures.join(checkout, pks[who], qid, price, nonce, deadline);
+        vm.prank(operator);
         checkout.joinWithSig(actors[who], qid, price, nonce, deadline, sig);
+    }
+
+    /// A stranger tries to relay a valid join: must always fail.
+    function strangerJoin(uint256 who, uint128 price) external {
+        who = bound(who, 0, actors.length - 1);
+        bytes32 nonce = bytes32(++nonceCounter);
+        uint256 deadline = block.timestamp + 60;
+        bytes memory sig = Signatures.join(checkout, pks[who], qid, price, nonce, deadline);
+        try checkout.joinWithSig(actors[who], qid, price, nonce, deadline, sig) {
+            ghostAccessBroken = true;
+        } catch {}
     }
 
     function skip(uint256 who, uint32 target, uint256 buffer, uint128 newPrice) external {
@@ -256,7 +263,7 @@ contract X429CheckoutInvariantTest is Test {
     function setUp() public {
         vm.warp(1_800_000_000);
         token = new MockUSDC();
-        checkout = new X429Checkout(IERC20(address(token)));
+        checkout = new X429Checkout(IERC20(address(token)), operator);
         vm.prank(operator);
         qid = checkout.createQueue(32, 300, "");
         handler = new Handler(checkout, token, qid, operator);
@@ -287,6 +294,11 @@ contract X429CheckoutInvariantTest is Test {
     function invariant_passedTicketsGetTheirPrice() public view {
         assertFalse(handler.ghostUnderpaid());
         assertFalse(handler.ghostOvercharged());
+    }
+
+    /// Only the operator relays joins (and, tested elsewhere, skips and serves).
+    function invariant_onlyOperatorRelaysJoins() public view {
+        assertFalse(handler.ghostAccessBroken());
     }
 
     function invariant_earnedEqualsPaidEqualsCompensation() public view {
@@ -323,7 +335,8 @@ contract X429CheckoutInvariantTest is Test {
     /// The handler's skip paths really apply skips (otherwise the invariants above would prove little).
     function test_handlerExercisesSkipsAndFrontRuns() public {
         handler.join(0, 10_000);
-        handler.joinWithSig(1, 20_000);
+        handler.join(1, 20_000);
+        handler.strangerJoin(2, 1);
         handler.join(2, 30_000);
         handler.skip(3, 1, 500, 1_000);
         handler.frontRun(4, 400_000);

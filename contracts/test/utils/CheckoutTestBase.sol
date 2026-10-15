@@ -28,7 +28,7 @@ abstract contract CheckoutTestBase is Test {
 
     function _setUpCheckout(address token) internal {
         usdc = IERC20(token);
-        checkout = new X429Checkout(usdc);
+        checkout = new X429Checkout(usdc, operator);
         vm.prank(operator);
         qid = checkout.createQueue(64, FEE_BPS, '{"name":"test"}');
         payer = vm.addr(payerPk);
@@ -49,11 +49,18 @@ abstract contract CheckoutTestBase is Test {
     }
 
     function _joinWithSig(uint256 pk, uint128 price) internal returns (uint64) {
-        bytes32 nonce = keccak256(abi.encode("join", pk, price, block.timestamp));
+        return _joinTo(qid, pk, price);
+    }
+
+    uint256 private _joinNonce;
+
+    /// @dev The owner signs a Join, the operator relays it (the only way to join).
+    function _joinTo(uint32 queueId, uint256 pk, uint128 price) internal returns (uint64) {
+        bytes32 nonce = keccak256(abi.encode("join", ++_joinNonce));
         uint256 deadline = block.timestamp + 600;
-        bytes memory sig = Signatures.join(checkout, pk, qid, price, nonce, deadline);
-        vm.prank(relayer);
-        return checkout.joinWithSig(vm.addr(pk), qid, price, nonce, deadline, sig);
+        bytes memory sig = Signatures.join(checkout, pk, queueId, price, nonce, deadline);
+        vm.prank(operator);
+        return checkout.joinWithSig(vm.addr(pk), queueId, price, nonce, deadline, sig);
     }
 
     function _auth(uint256 pk, uint256 value, bytes32 nonce) internal view returns (X429Checkout.Authorization memory) {

@@ -13,7 +13,7 @@ import {
   type TransactionReceipt,
 } from "viem";
 import { checkoutAbi } from "./abi.ts";
-import { RevertError, usdcAbi, type Relayer } from "./chain.ts";
+import { PendingTxError, RevertError, usdcAbi, type Relayer } from "./chain.ts";
 import type { Config } from "./config.ts";
 import {
   caip2,
@@ -24,6 +24,7 @@ import {
   usdcDomain,
 } from "./protocol.ts";
 import { isQuoteError, quoteSkip, type Quote, type QueueReader, type Snapshot } from "./queue.ts";
+import { RateLimiter } from "./ratelimit.ts";
 import { v1Network, type DecodedPayment, type RequirementsInput } from "./x402.ts";
 
 export type Log = (entry: Record<string, unknown>) => void;
@@ -100,8 +101,10 @@ export class Checkout {
   readonly reader: QueueReader;
   readonly relayer: Relayer | undefined;
   private readonly log: Log;
+  private readonly joinLimiter: RateLimiter;
 
   constructor(cfg: Config, client: PublicClient, reader: QueueReader, relayer: Relayer | undefined, log: Log) {
+    this.joinLimiter = new RateLimiter(cfg.joinsPerMinute, 60_000);
     this.cfg = cfg;
     this.client = client;
     this.reader = reader;
@@ -223,13 +226,23 @@ export class Checkout {
     };
   }
 
-  async join(input: { owner: string; skipPrice: string | bigint; nonce: string; deadline: string | bigint; signature: string }) {
+  /**
+   * Relays a signed Join. `client` (the caller's IP) is rate-limited: every relayed join costs the
+   * operator gas, and joins are free for the user, so this is the spam control (SPEC §10).
+   */
+  async join(
+    input: { owner: string; skipPrice: string | bigint; nonce: string; deadline: string | bigint; signature: string },
+    client = "local",
+  ) {
     const relayer = this.requireRelayer();
     const owner = parseAddress(input.owner, "owner");
     const skipPrice = parseUint(input.skipPrice, "skipPrice");
     const deadline = parseUint(input.deadline, "deadline");
     const nonce = parseBytes32(input.nonce, "nonce");
     const signature = parseSignatureHex(input.signature);
+    if (!this.joinLimiter.take(client)) {
+      throw new CheckoutError(429, "too_many_joins", `at most ${this.cfg.joinsPerMinute} joins per minute from one client`);
+    }
     const receipt = await relayer
       .exclusive(() =>
         relayer.call("joinWithSig", [owner, this.cfg.queueId, skipPrice, nonce, deadline, signature], "joinWithSig"),
@@ -373,15 +386,8 @@ export class Checkout {
     if (!validSig) throw fail(402, "invalid_exact_evm_payload_signature", "the EIP-3009 signature does not recover to authorization.from");
 
     return relayer.exclusive(async () => {
-      const block = await this.client.getBlock();
-      const chainNow = block.timestamp;
-      if (auth.validBefore <= chainNow + 2n) {
-        throw fail(402, "invalid_exact_evm_payload_authorization_valid_before", "the payment authorization has expired");
-      }
-      if (auth.validAfter >= chainNow + 1n) {
-        throw fail(402, "invalid_exact_evm_payload_authorization_valid_after", "the payment authorization is not valid yet");
-      }
-      const [settled, used] = await Promise.all([
+      const [block, settled, used] = await Promise.all([
+        this.client.getBlock(),
         this.client.readContract({
           address: this.cfg.contract,
           abi: checkoutAbi,
@@ -399,11 +405,19 @@ export class Checkout {
       let frontRun = false;
       if (used) {
         // someone submitted the authorization straight to USDC. Only settle it if that transfer
-        // really paid this contract (a cancelled authorization also marks the nonce used).
+        // really paid this contract (a cancelled authorization also marks the nonce used). Its time
+        // window no longer matters: the money already moved and must be applied or refunded.
         frontRun = await this.frontRunPaidUs(auth.from, auth.nonce, auth.value);
         if (!frontRun) throw fail(402, "invalid_transaction_state", "this authorization was already used or cancelled elsewhere");
         this.log({ evt: "front_run_detected", payer: auth.from, nonce: auth.nonce, value: auth.value });
       } else {
+        const chainNow = block.timestamp;
+        if (auth.validBefore <= chainNow + 2n) {
+          throw fail(402, "invalid_exact_evm_payload_authorization_valid_before", "the payment authorization has expired");
+        }
+        if (auth.validAfter >= chainNow + 1n) {
+          throw fail(402, "invalid_exact_evm_payload_authorization_valid_after", "the payment authorization is not valid yet");
+        }
         const balance = await this.client.readContract({
           address: this.cfg.usdc,
           abi: usdcAbi,
@@ -442,6 +456,9 @@ export class Checkout {
           throw fail(402, "price_moved", `the price moved: the skip now costs ${fmtUsd(cost)}, above the ${fmtUsd(value)} you signed. Nothing was charged.`, { cost, signed: value });
         }
         if (err instanceof RevertError) throw fail(402, "invalid_transaction_state", `settlement would revert: ${err.errorName} ${err.message}`);
+        if (err instanceof PendingTxError) {
+          throw fail(504, "settlement_pending", "the settlement transaction was sent but is not confirmed yet; check the transaction before paying again", { txHash: err.hash });
+        }
         throw err;
       }
       await this.reader.atLeast(receipt.blockNumber).catch(() => undefined);
@@ -452,31 +469,43 @@ export class Checkout {
     });
   }
 
-  /** Looks for the USDC AuthorizationUsed(from, nonce) log and a Transfer(from → contract, value) in the same tx. */
+  /**
+   * True if USDC executed exactly this authorization into this contract: the `AuthorizationUsed(from,
+   * nonce)` log must be followed directly by `Transfer(from → contract, value)` (FiatToken emits them
+   * back to back). A cancelled nonce, or a nonce spent elsewhere in a transaction that also paid the
+   * contract through another nonce, does not count. Scans back to the deploy block in chunks.
+   */
   private async frontRunPaidUs(from: Address, nonce: Hex, value: bigint): Promise<boolean> {
     const latest = await this.client.getBlockNumber({ cacheTime: 0 });
-    const window = 50_000n; // about a day of Base blocks
-    let fromBlock = latest > window ? latest - window : 0n;
-    if (fromBlock < this.cfg.deployBlock) fromBlock = this.cfg.deployBlock;
-    const logs = await this.client.getContractEvents({
-      address: this.cfg.usdc,
-      abi: usdcAbi,
-      eventName: "AuthorizationUsed",
-      args: { authorizer: from, nonce },
-      fromBlock,
-      toBlock: "latest",
-    });
-    for (const log of logs) {
-      const receipt = await this.client.getTransactionReceipt({ hash: log.transactionHash! });
-      const transfers = parseEventLogs({ abi: usdcAbi, logs: receipt.logs, eventName: "Transfer" });
-      const paid = transfers.some(
-        (t) =>
-          t.address.toLowerCase() === this.cfg.usdc.toLowerCase() &&
-          t.args.from.toLowerCase() === from.toLowerCase() &&
-          t.args.to.toLowerCase() === this.cfg.contract.toLowerCase() &&
-          t.args.value === value,
-      );
-      if (paid) return true;
+    const chunk = 10_000n;
+    const usdc = this.cfg.usdc.toLowerCase();
+    // without a configured deploy block, look back about two days of Base blocks
+    const floor = this.cfg.deployBlock > 0n ? this.cfg.deployBlock : latest > 100_000n ? latest - 100_000n : 0n;
+    for (let to = latest; to >= floor; to -= chunk) {
+      const fromBlock = to - chunk + 1n > floor ? to - chunk + 1n : floor;
+      const logs = await this.client.getContractEvents({
+        address: this.cfg.usdc,
+        abi: usdcAbi,
+        eventName: "AuthorizationUsed",
+        args: { authorizer: from, nonce },
+        fromBlock,
+        toBlock: to,
+      });
+      for (const log of logs) {
+        const receipt = await this.client.getTransactionReceipt({ hash: log.transactionHash! });
+        const next = receipt.logs.find((l) => l.logIndex === log.logIndex! + 1);
+        if (!next || next.address.toLowerCase() !== usdc) continue;
+        const [transfer] = parseEventLogs({ abi: usdcAbi, logs: [next], eventName: "Transfer" });
+        if (
+          transfer &&
+          transfer.args.from.toLowerCase() === from.toLowerCase() &&
+          transfer.args.to.toLowerCase() === this.cfg.contract.toLowerCase() &&
+          transfer.args.value === value
+        ) {
+          return true;
+        }
+      }
+      if (logs.length > 0 || fromBlock === floor) break; // a nonce is used once
     }
     return false;
   }

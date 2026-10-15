@@ -147,9 +147,24 @@ about 60k when everything it touches is cold and it is the owner's first credit.
 - The operator relays everything and pays gas. It cannot move a user's USDC beyond what the user
   signed, cannot pay a passed ticket less than its posted price, and has no admin function over user
   funds: it can create queues, serve, set a fee up to 10% and withdraw its own fees.
-- The EIP-3009 signature does not bind the target position, so only the queue operator may settle a
-  skip. See SPEC §10 for this and the front-run trust model.
-- Not audited.
+- One contract serves one operator, fixed at deploy. The EIP-3009 signature binds the payment to the
+  contract but not to a queue or target position, so only that operator may create queues, relay
+  joins and settle skips; otherwise anyone who saw a payment header could spend it on a queue of
+  their own. See SPEC §10 for this and the front-run trust model.
+- Joins are free for users and cost the operator gas, so they only go through the operator, which
+  rate-limits them per client.
+- Not audited. An internal review found and fixed two fund-safety issues before this version (see
+  the commit history).
+
+## Known limits
+
+- The operator is trusted to apply the target position the payer asked for over HTTP (the payment
+  signature cannot carry it, because PayBox chooses the EIP-3009 nonce).
+- Spam joins from many IPs with throwaway keys can still fill a queue to `maxLength`. A refundable
+  join bond would fix that.
+- Admissions (served, not yet redeemed tickets) live in server memory; a restart drops them.
+- Smart-contract wallets can join and claim (ERC-1271), but x402 payment uses the `v,r,s`
+  `transferWithAuthorization`, so payers must sign as EOAs (EIP-7702-delegated EOAs work).
 
 ## Credits
 

@@ -58,6 +58,16 @@ export class RevertError extends Error {
   }
 }
 
+/** A transaction was sent but its receipt did not arrive in time. It may still be mined. */
+export class PendingTxError extends Error {
+  readonly hash: Hash;
+
+  constructor(hash: Hash, cause: unknown) {
+    super(`transaction ${hash} not confirmed yet: ${String((cause as Error)?.message ?? cause).split("\n")[0]}`);
+    this.hash = hash;
+  }
+}
+
 export function decodeRevert(err: unknown): RevertError | undefined {
   if (!(err instanceof BaseError)) return undefined;
   const revert = err.walk((e) => e instanceof ContractFunctionRevertedError);
@@ -131,7 +141,12 @@ export class Relayer {
       throw decodeRevert(err) ?? err;
     }
     const hash = await this.wallet.writeContract(request as never);
-    const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 60_000 });
+    let receipt: TransactionReceipt;
+    try {
+      receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 60_000 });
+    } catch (err) {
+      throw new PendingTxError(hash, err);
+    }
     this.gas.push({ fn: functionName, gasUsed: receipt.gasUsed, tx: hash, note });
     if (this.gas.length > 500) this.gas.shift();
     if (receipt.status !== "success") throw new RevertError("Reverted", [], `${functionName} reverted in ${hash}`);

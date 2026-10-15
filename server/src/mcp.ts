@@ -52,7 +52,7 @@ export const TOOL_NAMES = [
   "x429_redeem",
 ] as const;
 
-export function buildMcpServer(checkout: Checkout, busyPath: string): McpServer {
+export function buildMcpServer(checkout: Checkout, busyPath: string, client = "local"): McpServer {
   const cfg = checkout.cfg;
   const server = new McpServer({ name: "x429-checkout", version: "0.2.0" });
 
@@ -124,7 +124,7 @@ export function buildMcpServer(checkout: Checkout, busyPath: string): McpServer 
     },
     (input) =>
       run(async () => {
-        const r = await checkout.join(input);
+        const r = await checkout.join(input, client);
         return ok(r, "You are in line. Poll x429_status; once served, call x429_redeem.");
       }),
   );
@@ -265,8 +265,15 @@ export async function pluginManifest(checkout: Checkout, busyPath: string) {
 }
 
 /** Handles one MCP HTTP request in stateless mode (a fresh server + transport per request). */
-export async function handleMcp(checkout: Checkout, busyPath: string, req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> {
-  const server = buildMcpServer(checkout, busyPath);
+export async function handleMcp(
+  checkout: Checkout,
+  busyPath: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  body: unknown,
+  client: string,
+): Promise<void> {
+  const server = buildMcpServer(checkout, busyPath, client);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on("close", () => {
     void transport.close();

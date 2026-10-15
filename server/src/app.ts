@@ -37,6 +37,13 @@ const CORS = {
   "access-control-expose-headers": "payment-required, payment-response, x-payment-response, retry-after, x-429-queue",
 };
 
+/** The caller's address for rate limits. Behind a proxy, set the proxy to overwrite X-Forwarded-For. */
+export function clientIp(req: IncomingMessage): string {
+  const fwd = req.headers["x-forwarded-for"];
+  const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(",")[0]?.trim();
+  return first || req.socket.remoteAddress || "unknown";
+}
+
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...CORS, ...headers });
   res.end(toJson(body, 2));
@@ -220,7 +227,7 @@ export function createApp({ checkout, gate, feed, log, siteDir }: AppDeps): Serv
       const price = url.searchParams.get("skipPrice");
       return send(res, 200, await checkout.joinTypedData(owner, price ? parseUint(price, "skipPrice") : undefined));
     }
-    if (p === "/join" && m === "POST") return send(res, 200, await checkout.join((await readBody(req)) as never));
+    if (p === "/join" && m === "POST") return send(res, 200, await checkout.join((await readBody(req)) as never, clientIp(req)));
     if (p === "/claim/typed-data") {
       const owner = parseAddress(url.searchParams.get("owner"), "owner");
       const recipient = url.searchParams.get("recipient");
@@ -244,7 +251,7 @@ export function createApp({ checkout, gate, feed, log, siteDir }: AppDeps): Serv
     if (p === "/paybox-plugin.json") return send(res, 200, await pluginManifest(checkout, BUSY_PATH));
     if (p === "/mcp") {
       const body = m === "POST" ? await readBody(req) : undefined;
-      return handleMcp(checkout, BUSY_PATH, req, res, body);
+      return handleMcp(checkout, BUSY_PATH, req, res, body, clientIp(req));
     }
     if (m === "GET" && (await staticFile(res, p))) return;
     send(res, 404, { error: "not_found" });

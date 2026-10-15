@@ -21,7 +21,14 @@ contract X429CheckoutTest is CheckoutTestBase {
 
     // ------------------------------------------------------------------ queues and operator
 
+    function test_constructor_needsOperator() public {
+        vm.expectRevert(X429Checkout.NotOperator.selector);
+        new X429Checkout(usdc, address(0));
+        assertEq(checkout.operator(), operator);
+    }
+
     function test_createQueue_validates() public {
+        vm.startPrank(operator);
         vm.expectRevert(X429Checkout.InvalidMaxLength.selector);
         checkout.createQueue(0, 0, "");
         vm.expectRevert(X429Checkout.InvalidMaxLength.selector);
@@ -29,8 +36,23 @@ contract X429CheckoutTest is CheckoutTestBase {
         vm.expectRevert(X429Checkout.InvalidFee.selector);
         checkout.createQueue(10, 1001, "");
         uint32 id = checkout.createQueue(10, 1000, "x");
-        assertEq(checkout.queueInfo(id).operator, address(this));
+        vm.stopPrank();
+        assertEq(checkout.queueInfo(id).operator, operator);
         assertEq(checkout.queueCount(), 2);
+    }
+
+    /// Regression: if anyone could open a queue (and so settle skips), anyone who saw an X-PAYMENT header
+    /// could spend it on a queue of their own and pay themselves.
+    function test_strangerCannotOpenQueueOrSpendAPayment() public {
+        _rivalsJoin();
+        X429Checkout.Authorization memory a = _auth(payerPk, 1_000_000, keccak256("seen"));
+        vm.startPrank(relayer);
+        vm.expectRevert(X429Checkout.NotOperator.selector);
+        checkout.createQueue(4, 0, "");
+        vm.expectRevert(X429Checkout.NotOperator.selector);
+        checkout.skip(qid, 1, 0, a);
+        vm.stopPrank();
+        assertEq(token.balanceOf(payer), 10_000_000);
     }
 
     function test_setFee_onlyOperator_capped() public {
@@ -47,8 +69,9 @@ contract X429CheckoutTest is CheckoutTestBase {
     function test_unknownQueue() public {
         vm.expectRevert(X429Checkout.UnknownQueue.selector);
         checkout.queueInfo(99);
+        vm.prank(operator);
         vm.expectRevert(X429Checkout.UnknownQueue.selector);
-        checkout.join(99, 1);
+        checkout.joinWithSig(rivals[0], 99, 1, bytes32(0), block.timestamp, "");
     }
 
     // ------------------------------------------------------------------ join
@@ -67,6 +90,12 @@ contract X429CheckoutTest is CheckoutTestBase {
         uint256 deadline = block.timestamp + 60;
         bytes memory sig = Signatures.join(checkout, rivalPks[0], qid, 4_000, nonce, deadline);
 
+        // only the operator relays joins
+        vm.prank(relayer);
+        vm.expectRevert(X429Checkout.NotOperator.selector);
+        checkout.joinWithSig(rivals[0], qid, 4_000, nonce, deadline, sig);
+
+        vm.startPrank(operator);
         // wrong owner for the signature
         vm.expectRevert(X429Checkout.InvalidSignature.selector);
         checkout.joinWithSig(rivals[1], qid, 4_000, nonce, deadline, sig);
@@ -83,29 +112,31 @@ contract X429CheckoutTest is CheckoutTestBase {
         vm.warp(deadline + 1);
         vm.expectRevert(X429Checkout.SignatureExpired.selector);
         checkout.joinWithSig(rivals[1], qid, 4_000, n2, deadline, late);
+        vm.stopPrank();
     }
 
     function test_join_onePerOwnerPerQueue() public {
-        vm.startPrank(rivals[0]);
-        checkout.join(qid, 1);
+        _joinTo(qid, rivalPks[0], 1);
         vm.expectRevert(X429Checkout.AlreadyWaiting.selector);
-        checkout.join(qid, 1);
-        vm.stopPrank();
+        this.joinExternal(qid, rivalPks[0], 1);
         // a different queue is fine
+        vm.prank(operator);
         uint32 other = checkout.createQueue(4, 0, "");
-        vm.prank(rivals[0]);
-        checkout.join(other, 1);
+        _joinTo(other, rivalPks[0], 1);
     }
 
     function test_join_queueFull() public {
+        vm.prank(operator);
         uint32 small = checkout.createQueue(2, 0, "");
-        vm.prank(rivals[0]);
-        checkout.join(small, 1);
-        vm.prank(rivals[1]);
-        checkout.join(small, 1);
-        vm.prank(rivals[2]);
+        _joinTo(small, rivalPks[0], 1);
+        _joinTo(small, rivalPks[1], 1);
         vm.expectRevert(X429Checkout.QueueFull.selector);
-        checkout.join(small, 1);
+        this.joinExternal(small, rivalPks[2], 1);
+    }
+
+    /// @dev External wrapper so `vm.expectRevert` sees exactly one call (the helper also signs).
+    function joinExternal(uint32 queueId, uint256 pk, uint128 price) external returns (uint64) {
+        return _joinTo(queueId, pk, price);
     }
 
     function test_cancelNonce_blocksRelay() public {
@@ -114,6 +145,7 @@ contract X429CheckoutTest is CheckoutTestBase {
         bytes memory sig = Signatures.join(checkout, rivalPks[0], qid, 4_000, nonce, deadline);
         vm.prank(rivals[0]);
         checkout.cancelNonce(nonce);
+        vm.prank(operator);
         vm.expectRevert(X429Checkout.NonceAlreadyUsed.selector);
         checkout.joinWithSig(rivals[0], qid, 4_000, nonce, deadline, sig);
     }
@@ -211,25 +243,25 @@ contract X429CheckoutTest is CheckoutTestBase {
         checkout.skip(qid, 1, 0, a1);
 
         // 65 passes are over the cap
+        vm.prank(operator);
         uint32 big = checkout.createQueue(100, 0, "");
         for (uint256 i = 0; i < 65; ++i) {
-            vm.prank(address(uint160(0x1000 + i)));
-            checkout.join(big, 1);
+            _joinTo(big, 0x1000 + i, 1);
         }
         X429Checkout.Authorization memory a = _auth(payerPk, 1_000_000, keccak256("c"));
+        vm.startPrank(operator);
         vm.expectRevert(abi.encodeWithSelector(X429Checkout.TooManyPasses.selector, uint32(65)));
         checkout.skip(big, 1, 0, a);
         checkout.skip(big, 2, 0, a); // 64 passes are fine
+        vm.stopPrank();
         assertEq(checkout.positionOf(checkout.activeTicket(big, payer)), 2);
     }
 
     function test_skip_zeroFee_andFreeTickets() public {
         vm.prank(operator);
         checkout.setFee(qid, 0);
-        vm.prank(rivals[0]);
-        checkout.join(qid, 0);
-        vm.prank(rivals[1]);
-        checkout.join(qid, 0);
+        _joinTo(qid, rivalPks[0], 0);
+        _joinTo(qid, rivalPks[1], 0);
         (, uint256 cost, uint256 refund) = _skip(1, 0, _auth(payerPk, 5, keccak256("p")));
         assertEq(cost, 0);
         assertEq(refund, 5);
@@ -414,9 +446,8 @@ contract X429CheckoutTest is CheckoutTestBase {
         address[] memory owners = new address[](8);
         for (uint256 i = 0; i < 8; ++i) {
             prices[i] = uint128(bound(prices[i], 0, 1_000_000)); // up to 1 USDC each
-            owners[i] = address(uint160(0x5000 + i));
-            vm.prank(owners[i]);
-            checkout.join(qid, prices[i]);
+            owners[i] = vm.addr(0x5000 + i);
+            _joinTo(qid, 0x5000 + i, prices[i]);
         }
         uint32 target = uint32(bound(targetSeed, 1, 8));
         uint256 expected;
@@ -440,8 +471,7 @@ contract X429CheckoutTest is CheckoutTestBase {
     function testFuzz_quoteMatchesSkip(uint8 n, uint8 targetSeed) public {
         n = uint8(bound(n, 1, 40));
         for (uint256 i = 0; i < n; ++i) {
-            vm.prank(address(uint160(0x7000 + i)));
-            checkout.join(qid, uint128(1_000 + i * 37));
+            _joinTo(qid, 0x7000 + i, uint128(1_000 + i * 37));
         }
         uint32 target = uint32(bound(targetSeed, 1, n));
         (uint32 fromPos, uint32 passes, uint256 compensation, uint256 fee) = checkout.quoteSkip(qid, payer, target);

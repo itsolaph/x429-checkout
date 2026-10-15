@@ -7,6 +7,11 @@ export const checkoutAbi = [
         "name": "usdc_",
         "type": "address",
         "internalType": "contract IERC20"
+      },
+      {
+        "name": "operator_",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
@@ -356,30 +361,6 @@ export const checkoutAbi = [
   },
   {
     "type": "function",
-    "name": "join",
-    "inputs": [
-      {
-        "name": "queueId",
-        "type": "uint32",
-        "internalType": "uint32"
-      },
-      {
-        "name": "skipPrice",
-        "type": "uint128",
-        "internalType": "uint128"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "ticketId",
-        "type": "uint64",
-        "internalType": "uint64"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "joinWithSig",
     "inputs": [
       {
@@ -455,6 +436,19 @@ export const checkoutAbi = [
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "operator",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"

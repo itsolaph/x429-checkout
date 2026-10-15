@@ -24,9 +24,11 @@ Reference implementation: `contracts/src/X429Checkout.sol`, `server/src/`.
 | **Client** (agent) | a wallet with USDC, no ETH needed | joins (signature), pays to skip (x402), claims (signature), redeems a served ticket (signature) |
 | **Contract** | all USDC in flight and owed | moves money and the queue atomically, credits compensation |
 
-The operator can never move a client's USDC except as the client signed it: the EIP-3009
-authorization fixes amount and recipient (the contract), and the contract pays every passed ticket
-its own posted price and refunds the rest to the payer.
+One contract serves **one operator**, fixed at deploy (`operator()` is immutable). The x402
+`payTo` is the contract, so a payment can only ever be settled by that operator. The operator can
+never move a client's USDC except as the client signed it: the EIP-3009 authorization fixes amount
+and recipient (the contract), and the contract pays every passed ticket its own posted price and
+refunds the rest to the payer.
 
 ## 2. The 429 response
 
@@ -103,6 +105,11 @@ EIP712Domain(string name,string version,uint256 chainId,address verifyingContrac
   name = "x429 Checkout", version = "1", chainId = 8453, verifyingContract = <contract>
 Join(address owner,uint32 queueId,uint128 skipPrice,bytes32 nonce,uint256 deadline)
 ```
+
+Only the operator can relay a join (`joinWithSig` is operator-only and there is no direct `join`).
+That is the spam control: joining is free for the client, so a join anyone could send would let a
+spammer fill the queue to `maxLength` and lock newcomers out. The server rate-limits relayed joins per
+client IP (`X429_JOINS_PER_MINUTE`, default 30) and answers 429 `too_many_joins` above it.
 
 `skipPrice` is what the ticket is paid each time it is passed. Nonces are random 32-byte values,
 single use, per owner (like EIP-3009), so concurrent signatures never block each other. An owner
@@ -256,9 +263,11 @@ contract credits `claimable` instead of reverting.
 to USDC: the USDC lands in the contract, the nonce is used, and no queue update happens.
 
 - The server sees `USDC.authorizationState(from, nonce) == true` while the contract has not settled
-  it. It then looks for USDC's `AuthorizationUsed(from, nonce)` log and requires a
-  `Transfer(from → contract, value)` in the same transaction. A nonce burned by
-  `cancelAuthorization`, or used for a different transfer, fails with `invalid_transaction_state`.
+  it. It then looks for USDC's `AuthorizationUsed(from, nonce)` log (back to the deploy block) and
+  requires the very next log to be `Transfer(from → contract, value)` from USDC (FiatToken emits the
+  two back to back). A nonce burned by `cancelAuthorization`, or used for a different transfer, fails
+  with `invalid_transaction_state`, even if the same transaction paid the contract through another
+  nonce. The authorization's time window is not checked here: the money already moved.
 - The contract, in `skip`, also sees the nonce used. It verifies the EIP-3009 signature over the
   exact authorization (`to` = itself) and that its USDC balance exceeds everything it owes by at
   least `value`. Then it **applies** the skip, or, if the skip is no longer possible (price moved,
@@ -309,24 +318,27 @@ Passed tickets accrue `claimable[owner]` (pull payments). To withdraw:
 3. `POST /claim` with `{...submit, signature}` → `{amount, txHash}`
 
 The whole balance goes to the signed `recipient`. A signature works once (`nonce_already_used`).
-Owners with ETH may call `claim(recipient)` directly. `cancelNonce(nonce)` burns an unused nonce.
+Anyone may relay a signed claim; owners with ETH may also call `claim(recipient)` directly.
+`cancelNonce(nonce)` burns an unused nonce.
 
 ## 7. Contract interface
 
 `contracts/src/X429Checkout.sol` (Solidity 0.8.30, no owner, no upgrade, no admin).
 
 ```solidity
-// operator (per queue)
-function createQueue(uint32 maxLength, uint16 feeBps, string meta) returns (uint32 queueId); // caller = operator; maxLength ≤ 256; fee ≤ 1000 bps
+constructor(IERC20 usdc, address operator);                             // one operator per contract, immutable
+
+// operator only
+function createQueue(uint32 maxLength, uint16 feeBps, string meta) returns (uint32 queueId); // maxLength ≤ 256; fee ≤ 1000 bps
 function setFee(uint32 queueId, uint16 feeBps);                         // ≤ 1000 bps (10%)
 function withdrawFees(uint32 queueId, address to) returns (uint256);    // only the queue's own fees
 function serve(uint32 queueId, uint32 count) returns (uint32 served);   // from the head
+function joinWithSig(address owner, uint32 queueId, uint128 skipPrice, bytes32 nonce, uint256 deadline, bytes signature)
+    returns (uint64 ticketId);                                          // relays the owner's signed Join
 function skip(uint32 queueId, uint32 targetPosition, uint128 newTicketSkipPrice, Authorization auth)
     returns (uint64 ticketId, uint256 cost, uint256 refund);
 
 // clients
-function join(uint32 queueId, uint128 skipPrice) returns (uint64 ticketId);
-function joinWithSig(address owner, uint32 queueId, uint128 skipPrice, bytes32 nonce, uint256 deadline, bytes signature) returns (uint64);
 function leave(uint64 ticketId);
 function claim(address recipient) returns (uint256);
 function claimWithSig(address owner, address recipient, bytes32 nonce, uint256 deadline, bytes signature) returns (uint256);
@@ -338,6 +350,8 @@ function getQueue(uint32 queueId, uint32 offset, uint32 limit) view returns (Tic
 function positionOf(uint64 ticketId) view returns (uint32);             // 1-based, 0 if not waiting
 function quoteSkip(uint32 queueId, address owner, uint32 targetPosition) view
     returns (uint32 fromPosition, uint32 passes, uint256 compensation, uint256 fee);
+function operator() view returns (address);
+function usdc() view returns (address);
 function tickets(uint64) view returns (owner, queueId, status, timesPassed, joinedAt, prev, next, skipPrice, earned, paid);
 function activeTicket(uint32 queueId, address owner) view returns (uint64);
 function claimable(address) view returns (uint256);
@@ -379,13 +393,19 @@ client's wallet (PayBox `request_wallet_sign`, `use_service` / `pay_x402`). See 
 | budget mode: pass as many as `msg.value` covers | target position: reach exactly #q or fail; ceiling + refund |
 | no fee | optional operator fee, capped at 10% |
 | `kick` for the operator | no kick: the operator cannot remove tickets |
+| anyone creates queues; anyone joins directly | one immutable operator per contract; joins only through the operator (rate-limited) |
 | `withdraw` / `withdrawFor` | `claim` / `claimWithSig` with a signed recipient |
 | redeem message `x429:v1:…` | `x429:v2:…` |
 
 ## 10. Security considerations
 
-**Operator trust.** The EIP-3009 signature fixes amount and recipient but not the target position,
-so only the queue's operator may call `skip`. A dishonest operator could settle a payment with a
+**Who may settle.** The EIP-3009 signature fixes amount and recipient (this contract) but not the
+queue or the target position. If anyone could open a queue and call `skip`, anyone who saw an
+`X-PAYMENT` header could spend it on a queue of their own and pay themselves. So each contract has
+exactly one operator, fixed at deploy, and only it may create queues, relay joins and settle skips.
+Operators who want separate trust domains deploy separate contracts.
+
+**Operator trust.** A dishonest operator could settle a payment with a
 different target than the client asked for over HTTP; it still cannot charge more than the signed
 `value`, cannot pay itself more than its capped fee, and every passed ticket still gets exactly its
 posted price. Every skip is public in `Skipped` and `Passed` events. The operator also decides
@@ -393,9 +413,10 @@ offchain admission: it can refuse service, but cannot reorder the onchain queue 
 
 **Front-run settlement.** The contract accepts a front-run payment if the signature is right and
 enough unaccounted USDC sits in the contract. Someone who signs an authorization to the contract and
-then burns its nonce with `cancelAuthorization` could, together with the operator, claim stray USDC
-that belongs to another front-run victim. The server's log check (§4.5) closes this for an honest
-operator. Stray USDC only exists between a front-run and its settlement.
+then burns its nonce with `cancelAuthorization` could, only together with the operator, claim stray
+USDC that belongs to another front-run victim. The server's log check (§4.5) closes this for an
+honest operator. Stray USDC only exists between a front-run and its settlement, and the server
+settles a front-run payment as soon as the payer (or anyone holding the header) retries.
 
 **Prices moving in flight.** Between the 402 and settlement other clients may skip ahead of the
 payer, adding tickets to pass. The ceiling bounds the damage: the payer pays the actual cost up to
@@ -407,8 +428,9 @@ outside its admission window and after its single use.
 
 **Griefing.** A ticket with a huge skip price cannot be passed at a sane cost; the queue degrades to
 plain FIFO behind it, which is what a 429 without x429 would be. Joining is free for the client but
-costs the operator gas, so an operator SHOULD rate-limit `POST /join` per address and IP; `maxLength`
-bounds the damage.
+costs the operator gas; joins go only through the operator, which rate-limits them per client IP.
+Throwaway keys from many IPs can still fill a queue up to `maxLength`; a refundable join bond is the
+next step if that matters (README, known limits).
 
 **Reentrancy.** `skip`, `claim`, `claimWithSig` and `withdrawFees` are `nonReentrant`. Every external
 call goes to USDC.

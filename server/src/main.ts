@@ -1,5 +1,6 @@
 // Entry point: node server/src/main.ts (configuration from env, see .env.example).
 import { resolve } from "node:path";
+import { checkoutAbi } from "./abi.ts";
 import { createApp } from "./app.ts";
 import { Relayer, makePublicClient } from "./chain.ts";
 import { Checkout } from "./checkout.ts";
@@ -21,9 +22,10 @@ if (chainId !== cfg.chainId) throw new Error(`RPC is chain ${chainId}, expected 
 
 const relayer = cfg.operatorKey ? new Relayer(client, cfg.operatorKey, cfg.contract) : undefined;
 const reader = new QueueReader(client, cfg.contract, cfg.queueId, cfg.pollMs);
-const snap = await reader.get(0);
-if (relayer && snap.operator.toLowerCase() !== relayer.address.toLowerCase()) {
-  throw new Error(`operator key ${relayer.address} is not the operator of queue ${cfg.queueId} (${snap.operator})`);
+await reader.get(0); // fails early on a wrong contract or queue id
+const operator = await client.readContract({ address: cfg.contract, abi: checkoutAbi, functionName: "operator" });
+if (relayer && operator.toLowerCase() !== relayer.address.toLowerCase()) {
+  throw new Error(`operator key ${relayer.address} is not the operator of ${cfg.contract} (${operator})`);
 }
 
 const checkout = new Checkout(cfg, client, reader, relayer, log);

@@ -27,7 +27,7 @@ contract Deploy is Script {
         string memory meta = vm.envOr("QUEUE_META", string('{"name":"x429 checkout"}'));
 
         vm.startBroadcast(deployerKey);
-        checkout = new X429Checkout(IERC20(usdc));
+        checkout = new X429Checkout(IERC20(usdc), vm.addr(operatorKey));
         vm.stopBroadcast();
 
         vm.startBroadcast(operatorKey);

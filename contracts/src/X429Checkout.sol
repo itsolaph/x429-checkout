@@ -36,10 +36,11 @@ interface IERC3009 {
 ///         every ticket in between its own posted price, plus an optional operator fee. Payment is an
 ///         EIP-3009 `transferWithAuthorization` signed by the payer (the x402 `exact` scheme), pulled
 ///         into this contract in the same transaction as the queue update. Users never need ETH:
-///         joins and claims are EIP-712 signatures that anyone may relay.
+///         joins are EIP-712 signatures the operator relays, claims are EIP-712 signatures anyone may relay.
 ///
-///         Compensation is pull based (`claimable`). The operator can create queues, relay skips,
-///         serve from the head, set its fee up to 10% and withdraw its own fees. Nothing else.
+///         One contract serves one operator (fixed at deploy). Compensation is pull based (`claimable`).
+///         The operator can create queues, relay joins and skips, serve from the head, set its fee up to
+///         10% and withdraw its own fees. Nothing else.
 contract X429Checkout is EIP712, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -138,6 +139,10 @@ contract X429Checkout is EIP712, ReentrancyGuard {
         keccak256("Claim(address owner,address recipient,bytes32 nonce,uint256 deadline)");
 
     IERC20 public immutable usdc;
+    /// @notice The only account that creates queues, relays joins and skips, and serves. Fixed at deploy:
+    ///         an x402 payment names this contract as `payTo`, so it can only ever be settled by this
+    ///         operator (one contract per operator, see SPEC §10).
+    address public immutable operator;
 
     uint32 public queueCount;
     uint64 public ticketCount;
@@ -216,14 +221,17 @@ contract X429Checkout is EIP712, ReentrancyGuard {
     error NothingToClaim();
     error InvalidRecipient();
 
-    constructor(IERC20 usdc_) EIP712("x429 Checkout", "1") {
+    constructor(IERC20 usdc_, address operator_) EIP712("x429 Checkout", "1") {
+        if (operator_ == address(0)) revert NotOperator();
         usdc = usdc_;
+        operator = operator_;
     }
 
     // ------------------------------------------------------------------ operator
 
-    /// @notice Open a queue. The caller becomes its operator: the only account that relays skips and serves.
+    /// @notice Open a queue (operator only).
     function createQueue(uint32 maxLength, uint16 feeBps, string calldata meta) external returns (uint32 queueId) {
+        if (msg.sender != operator) revert NotOperator();
         if (maxLength == 0 || maxLength > MAX_QUEUE_LENGTH) revert InvalidMaxLength();
         if (feeBps > MAX_FEE_BPS) revert InvalidFee();
         queueId = ++queueCount;
@@ -285,8 +293,10 @@ contract X429Checkout is EIP712, ReentrancyGuard {
     ///         applies the skip, or refunds the whole value if the skip is no longer possible. Normal
     ///         (not front-run) payments revert instead, so nothing moves and the authorization stays usable.
     ///
-    ///         Only the queue operator may call this: the EIP-3009 signature binds the amount, not the
-    ///         target position, so the operator relays exactly what the payer asked for over HTTP.
+    ///         Only the operator may call this. The EIP-3009 signature binds the amount and this contract
+    ///         (and so this operator), not the queue or the target position: the operator relays exactly
+    ///         what the payer asked for over HTTP. If anyone could settle, anyone who saw a payment header
+    ///         could spend it on a queue of their own.
     function skip(uint32 queueId, uint32 targetPosition, uint128 newTicketSkipPrice, Authorization calldata auth)
         external
         nonReentrant
@@ -329,12 +339,9 @@ contract X429Checkout is EIP712, ReentrancyGuard {
 
     // ------------------------------------------------------------------ clients
 
-    /// @notice Join the tail of a queue, paying your own gas.
-    function join(uint32 queueId, uint128 skipPrice) external returns (uint64 ticketId) {
-        ticketId = _join(queueId, msg.sender, skipPrice);
-    }
-
-    /// @notice Join on behalf of `owner`, who signed an EIP-712 `Join`. Anyone may relay it.
+    /// @notice Join on behalf of `owner`, who signed an EIP-712 `Join`. Relayed by the operator, who pays
+    ///         the gas. Joins go through the operator so it can rate-limit them: a free join that anyone
+    ///         could send would let a spammer fill the queue to `maxLength` and lock out every newcomer.
     function joinWithSig(
         address owner,
         uint32 queueId,
@@ -343,6 +350,7 @@ contract X429Checkout is EIP712, ReentrancyGuard {
         uint256 deadline,
         bytes calldata signature
     ) external returns (uint64 ticketId) {
+        _operatorQueue(queueId);
         _useSignature(
             owner, keccak256(abi.encode(JOIN_TYPEHASH, owner, queueId, skipPrice, nonce, deadline)), nonce, deadline, signature
         );
@@ -581,9 +589,12 @@ contract X429Checkout is EIP712, ReentrancyGuard {
     {
         if (block.timestamp > deadline) revert SignatureExpired();
         if (nonceUsed[owner][nonce]) revert NonceAlreadyUsed();
-        if (!SignatureChecker.isValidSignatureNow(owner, _hashTypedDataV4(structHash), signature)) {
-            revert InvalidSignature();
-        }
+        // ECDSA first, then ERC-1271: an EIP-7702-delegated EOA has code but still signs with its key
+        bytes32 digest = _hashTypedDataV4(structHash);
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, signature);
+        bool ok = err == ECDSA.RecoverError.NoError && recovered == owner;
+        if (!ok && owner.code.length > 0) ok = SignatureChecker.isValidERC1271SignatureNow(owner, digest, signature);
+        if (!ok) revert InvalidSignature();
         nonceUsed[owner][nonce] = true;
         emit NonceUsed(owner, nonce);
     }

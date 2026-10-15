@@ -92,8 +92,7 @@ contract X429CheckoutForkTest is CheckoutTestBase {
         vm.prank(operator);
         uint32 big = checkout.createQueue(256, FEE_BPS, "");
         for (uint256 i = 0; i < 64; ++i) {
-            vm.prank(address(uint160(0x9000 + i)));
-            checkout.join(big, 1_000);
+            _joinTo(big, 0x9000 + i, 1_000);
         }
         X429Checkout.Authorization memory a = _auth(payerPk, 1_000_000, keccak256("worst"));
         vm.cool(address(checkout));
@@ -105,6 +104,16 @@ contract X429CheckoutForkTest is CheckoutTestBase {
         emit log_named_uint("skip (join + 64 passes, cold) gas", used);
         assertLt(used, 5_000_000, "fits easily in a Base block");
         assertEq(checkout.positionOf(checkout.activeTicket(big, payer)), 1);
+    }
+
+    /// Many low test keys are EIP-7702-delegated on Base mainnet (they have code). Their ECDSA signatures
+    /// must still be accepted, as USDC itself does for transferWithAuthorization.
+    function test_fork_delegatedEoaCanJoin() public {
+        address eoa = vm.addr(0x9000);
+        vm.etch(eoa, hex"ef01000000000000000000000000000000000000000001"); // 7702 delegation designator
+        assertGt(eoa.code.length, 0);
+        uint64 id = _joinTo(qid, 0x9000, 1_000);
+        assertEq(checkout.positionOf(id), 1);
     }
 
     function test_fork_priceAboveCeilingMovesNothing() public {

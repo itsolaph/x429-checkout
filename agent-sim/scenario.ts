@@ -5,7 +5,7 @@
 // Failure cases: replayed payment, expired authorization (v1), expired quote (v2), price moved above
 // the signed ceiling, front-run authorization, claim replay. Every balance is asserted to the unit.
 import { readFileSync, writeFileSync } from "node:fs";
-import { createPublicClient, createWalletClient, http, parseSignature, type Address, type Hex } from "viem";
+import { createPublicClient, createWalletClient, http, parseAbi, parseSignature, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { checkoutAbi } from "../server/src/abi.ts";
 import { chainFor, usdcAbi } from "../server/src/chain.ts";
@@ -279,6 +279,35 @@ async function main() {
     recordSkip(res.body, "front-run victim");
     eq(res.body.position, 2, "moved to #2");
     eq(await usdcOf(fAgent.address), before - BigInt(res.body.cost), "net charge is exactly the cost");
+  });
+
+  await step("a cancelled authorization (nonce burned at USDC) is refused, nothing moves", async () => {
+    const pr = await late.paymentRequired("/skip?queue=1&target=2");
+    const payload = await late.signExact({ asset: pr.v1.asset, payTo: pr.v1.payTo, amount: BigInt(pr.v1.maxAmountRequired), maxTimeoutSeconds: pr.v1.maxTimeoutSeconds });
+    // the payer signs EIP-3009 CancelAuthorization for the same nonce; anyone may submit it
+    const cancelSig = await late.account.signTypedData({
+      domain: { name: "USD Coin", version: "2", chainId: CHAIN_ID, verifyingContract: USDC },
+      types: { CancelAuthorization: [{ name: "authorizer", type: "address" }, { name: "nonce", type: "bytes32" }] },
+      primaryType: "CancelAuthorization",
+      message: { authorizer: late.address, nonce: payload.authorization.nonce },
+    });
+    const { r, s, v, yParity } = parseSignature(cancelSig);
+    const wallet = createWalletClient({ account: watcher, transport: http(RPC), chain: chainFor({ chainId: CHAIN_ID, rpcUrl: RPC }) });
+    const hash = await wallet.writeContract({
+      address: USDC,
+      abi: parseAbi(["function cancelAuthorization(address authorizer, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)"]),
+      functionName: "cancelAuthorization",
+      args: [late.address, payload.authorization.nonce, Number(v ?? BigInt(yParity + 27)), r, s],
+    });
+    await client.waitForTransactionReceipt({ hash });
+    eq(await authUsed(late.address, payload.authorization.nonce), true, "nonce burned at USDC");
+    const before = await usdcOf(late.address);
+    const held = await usdcOf(CONTRACT);
+    const res = await late.http("POST", "/skip?queue=1&target=2", undefined, late.v1Header(payload));
+    eq(res.status, 402, `status (${JSON.stringify(res.body)})`);
+    eq(res.body.error, "invalid_transaction_state", "reason");
+    eq(await usdcOf(late.address), before, "payer untouched");
+    eq(await usdcOf(CONTRACT), held, "contract untouched");
   });
 
   await step("the paying agent is served next and redeems its ticket for one request", async () => {
