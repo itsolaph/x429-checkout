@@ -238,7 +238,7 @@ export class Checkout {
     const [joined] = parseEventLogs({ abi: checkoutAbi, logs: receipt.logs, eventName: "Joined" });
     if (!joined) throw new CheckoutError(502, "no_join_event", "join mined without a Joined event");
     this.reader.markSeen(joined.args.ticketId);
-    void this.reader.refresh().catch(() => {});
+    await this.reader.atLeast(receipt.blockNumber).catch(() => undefined);
     this.log({ evt: "joined", owner, ticketId: joined.args.ticketId, position: joined.args.position, tx: receipt.transactionHash });
     return {
       ticketId: joined.args.ticketId,
@@ -444,7 +444,7 @@ export class Checkout {
         if (err instanceof RevertError) throw fail(402, "invalid_transaction_state", `settlement would revert: ${err.errorName} ${err.message}`);
         throw err;
       }
-      void this.reader.refresh().catch(() => {});
+      await this.reader.atLeast(receipt.blockNumber).catch(() => undefined);
       const result = this.parseSkipReceipt(receipt, auth.from, frontRun);
       const joinedNote = result.ticketSkipPrice !== null ? ", join + skip" : "";
       relayer.annotate(receipt.transactionHash, `${result.passes} passes${joinedNote}${frontRun ? ", front-run settle" : ""}`);

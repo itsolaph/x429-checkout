@@ -192,6 +192,16 @@ export class QueueReader {
     return snap;
   }
 
+  /** A snapshot that includes block `block` (read-your-writes after our own transactions). */
+  async atLeast(block: bigint): Promise<Snapshot> {
+    for (let i = 0; i < 3; i++) {
+      if (this.snap && this.snap.blockNumber >= block) return this.snap;
+      // an in-flight read may have started before `block`; wait for it, then read again if needed
+      await this.refresh();
+    }
+    return this.snap!;
+  }
+
   /** Marks a ticket as seen now (e.g. right after we relayed its join), for the admission round. */
   markSeen(id: bigint): void {
     if (!this.firstSeen.has(id)) this.firstSeen.set(id, Date.now());

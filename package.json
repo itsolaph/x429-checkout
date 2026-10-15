@@ -15,7 +15,7 @@
     "server": "node server/src/main.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:contracts": "forge test --root contracts",
-    "test:server": "node --test server/test/",
+    "test:server": "node --test \"server/test/*.test.ts\"",
     "e2e": "bash scripts/e2e-local.sh",
     "mcp:smoke": "bash scripts/mcp-smoke.sh"
   },
