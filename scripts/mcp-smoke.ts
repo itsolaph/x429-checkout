@@ -97,6 +97,12 @@ check(/request_wallet_sign/.test(redeem.next), "redeem says to call request_wall
 const bad = (await client.callTool({ name: "x429_quote", arguments: { targetPosition: 9 } })) as ToolResult;
 check(bad.isError === true, "quote beyond the line is a tool error");
 
+// 9. the PayBox-shaped plugin manifest lists the same tools with inline schemas
+const manifest = await (await fetch(`${API}/paybox-plugin.json`)).json();
+check(manifest.type === "unofficial" && manifest.mcp_url === `${API}/mcp`, "manifest points at /mcp");
+check(JSON.stringify(manifest.tools.map((t: { name: string }) => t.name).sort()) === JSON.stringify(names), "manifest tools = MCP tools");
+check(manifest.tools.every((t: { inputSchema: { type: string } }) => t.inputSchema.type === "object"), "manifest carries input schemas");
+
 await client.close();
 console.log(`[mcp] PASS: ${passed} checks`);
 process.exit(0);

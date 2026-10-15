@@ -8,7 +8,7 @@ import { CheckoutError, parseAddress, parseUint, type Checkout, type Log } from 
 import type { Feed } from "./feed.ts";
 import type { Gate } from "./gate.ts";
 import { toJson } from "./json.ts";
-import { handleMcp } from "./mcp.ts";
+import { handleMcp, pluginManifest } from "./mcp.ts";
 import {
   V1_RESPONSE_HEADER,
   V2_REQUIRED_HEADER,
@@ -241,6 +241,7 @@ export function createApp({ checkout, gate, feed, log, siteDir }: AppDeps): Serv
       });
     }
     if (p === "/stats") return send(res, 200, { gate: gate.snapshotStats(), gas: checkout.relayer?.gas ?? [] });
+    if (p === "/paybox-plugin.json") return send(res, 200, await pluginManifest(checkout, BUSY_PATH));
     if (p === "/mcp") {
       const body = m === "POST" ? await readBody(req) : undefined;
       return handleMcp(checkout, BUSY_PATH, req, res, body);

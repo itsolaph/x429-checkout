@@ -4,7 +4,10 @@
 // come from PayBox `request_wallet_sign` and payments from PayBox `use_service` / `pay_x402`, so
 // every money step goes through the user's passkey approval in PayBox.
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { CheckoutError, parseAddress, parseUint, type Checkout } from "./checkout.ts";
@@ -226,6 +229,39 @@ export function buildMcpServer(checkout: Checkout, busyPath: string): McpServer 
   );
 
   return server;
+}
+
+/**
+ * The MCP tool list in the shape of the PayBox SDK's `PluginSummary` (type "unofficial", tools with
+ * inline JSON schemas). The third-party plugin format is not published yet; this is the thin layer
+ * to adapt once it is. Built by listing tools from an in-process MCP client, so it never drifts.
+ */
+export async function pluginManifest(checkout: Checkout, busyPath: string) {
+  const server = buildMcpServer(checkout, busyPath);
+  const client = new Client({ name: "x429-manifest", version: "0.2.0" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  const { tools } = await client.listTools();
+  await client.close();
+  await server.close();
+  return {
+    id: "x429-checkout",
+    name: "x429 Checkout",
+    description:
+      "Pay to skip the line at a rate-limited API. Every agent you pass is paid its posted price in USDC on Base (x402). Joining and claiming are free, gasless signatures.",
+    type: "unofficial" as const,
+    enabled: true,
+    protocol_version: LATEST_PROTOCOL_VERSION,
+    mcp_url: `${checkout.cfg.publicUrl}/mcp`,
+    tools: tools.map((t) => ({
+      name: t.name,
+      title: t.title,
+      description: t.description,
+      inputSchema: t.inputSchema,
+      outputSchema: t.outputSchema ?? null,
+      annotations: t.annotations ?? null,
+    })),
+  };
 }
 
 /** Handles one MCP HTTP request in stateless mode (a fresh server + transport per request). */

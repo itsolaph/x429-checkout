@@ -85,6 +85,28 @@ contract X429CheckoutForkTest is CheckoutTestBase {
         checkout.skip(qid, 1, 0, a);
     }
 
+    /// Gas for the worst case the contract allows: a newcomer joins and passes 64 tickets, each owned by
+    /// a fresh address (cold storage, zero claimable before). Storage is cooled before measuring so the
+    /// number is close to a standalone transaction (minus the 21k intrinsic gas and calldata).
+    function test_fork_gas_worstCaseSkip64() public {
+        vm.prank(operator);
+        uint32 big = checkout.createQueue(256, FEE_BPS, "");
+        for (uint256 i = 0; i < 64; ++i) {
+            vm.prank(address(uint160(0x9000 + i)));
+            checkout.join(big, 1_000);
+        }
+        X429Checkout.Authorization memory a = _auth(payerPk, 1_000_000, keccak256("worst"));
+        vm.cool(address(checkout));
+        vm.cool(BASE_USDC);
+        vm.prank(operator);
+        vm.startSnapshotGas("skip_join_64_passes");
+        checkout.skip(big, 1, 1_000, a);
+        uint256 used = vm.stopSnapshotGas();
+        emit log_named_uint("skip (join + 64 passes, cold) gas", used);
+        assertLt(used, 5_000_000, "fits easily in a Base block");
+        assertEq(checkout.positionOf(checkout.activeTicket(big, payer)), 1);
+    }
+
     function test_fork_priceAboveCeilingMovesNothing() public {
         _rivalsJoin();
         (,, uint256 compensation, uint256 fee) = checkout.quoteSkip(qid, payer, 1);
