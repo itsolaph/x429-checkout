@@ -345,6 +345,23 @@ async function main() {
     eq(await usdcOf(last.address), before + owed, "fresh claim pays exactly");
   });
 
+  await step("an agent already in line pays to move up 3 places (skip without join)", async () => {
+    const r1 = rivals[0]!;
+    const q = await r1.http("GET", `/queue?owner=${r1.address}`);
+    const ticket = q.body.you.ticket;
+    check(ticket && ticket.position >= 4, `rival-1 still waits at #4 or later (${JSON.stringify(ticket)})`);
+    const target = ticket.position - 3;
+    const before = await usdcOf(r1.address);
+    const paid = await r1.pay(`/skip?queue=1&target=${target}&owner=${r1.address}`);
+    eq(paid.result.status, 200, `rival-1 skip (${JSON.stringify(paid.result.body)})`);
+    recordSkip(paid.result.body, "rival-1 move up");
+    eq(paid.result.body.ticketSkipPrice, null, "no new ticket");
+    eq(paid.result.body.passes, 3, "passed 3");
+    eq(paid.result.body.position, target, "new position");
+    eq(BigInt(paid.result.body.ticketId), BigInt(ticket.id), "same ticket");
+    eq(await usdcOf(r1.address), before - BigInt(paid.result.body.cost), "charged exactly the cost");
+  });
+
   await step("books balance: contract USDC = claimables + fees; every payer charged exactly", async () => {
     const held = await usdcOf(CONTRACT);
     const totalClaimable = await client.readContract({ address: CONTRACT, abi: checkoutAbi, functionName: "totalClaimable" });
@@ -354,7 +371,12 @@ async function main() {
     let owedSum = 0n;
     for (const a of everyone) owedSum += await claimableOf(a.address);
     eq(totalClaimable, owedSum, "claimables are all ours");
-    const feed = await skipper.http("GET", "/feed?limit=200");
+    // the dashboard feed indexes events by polling; give it a moment to catch up
+    let feed = await skipper.http("GET", "/feed?limit=200");
+    for (let i = 0; i < 20 && BigInt(feed.body.totals.paidToWaiting) !== paidToWaiting; i++) {
+      await sleep(250);
+      feed = await skipper.http("GET", "/feed?limit=200");
+    }
     eq(BigInt(feed.body.totals.paidToWaiting), paidToWaiting, "dashboard total paid to people waiting");
     for (const a of [skipper, late, pAgent, qAgent, fAgent]) {
       eq(await client.getBalance({ address: a.address }), 0n, `${a.name} holds no ETH: every action was gasless`);

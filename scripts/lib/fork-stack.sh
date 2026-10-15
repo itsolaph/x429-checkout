@@ -131,7 +131,9 @@ start_stack() {
   for i in 6 7 8 9 10; do
     cast send --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" "$USDC" 'mint(address,uint256)' "$(addr "${AGENT_KEYS[$i]}")" 5000000 >/dev/null
   done
-  log "minted 5 USDC to each of 5 paying agents through a minter set by USDC's masterMinter ($master)"
+  # rival-1 also gets 1 USDC, to pay for a move with a ticket it already holds
+  cast send --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" "$USDC" 'mint(address,uint256)' "$(addr "${AGENT_KEYS[0]}")" 1000000 >/dev/null
+  log "minted forked USDC through a minter set by USDC's masterMinter ($master): 5 USDC to each of 5 paying agents, 1 USDC to rival-1"
 
   # 6. dashboard + server
   node web/build.mjs >"$WORK/web.log" 2>&1 || { cat "$WORK/web.log"; die "dashboard build failed"; }

@@ -30,6 +30,8 @@ X429_DEPLOY_BLOCK="$DEPLOY_BLOCK" E2E_KEYS="$WORK/keys.json" E2E_SUMMARY="$WORK/
   node agent-sim/scenario.ts | tee "$WORK/agents.log"
 [ "${PIPESTATUS[0]}" -eq 0 ] || die "scenario failed"
 
+node scripts/render-check.mjs "$API" || die "dashboard render check failed"
+
 node -e '
   const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
   console.log("gas used on the fork (all paid by the operator):");
