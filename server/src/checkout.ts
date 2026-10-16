@@ -25,7 +25,8 @@ import {
 } from "./protocol.ts";
 import { isQuoteError, quoteSkip, type Quote, type QueueReader, type Snapshot } from "./queue.ts";
 import { RateLimiter } from "./ratelimit.ts";
-import { v1Network, type DecodedPayment, type RequirementsInput } from "./x402.ts";
+import { TokenStore } from "./tokens.ts";
+import { v1Network, type Authorization, type DecodedPayment, type RequirementsInput } from "./x402.ts";
 
 export type Log = (entry: Record<string, unknown>) => void;
 
@@ -50,6 +51,7 @@ export type SkipOffer = {
 };
 
 export type SkipResult = {
+  replayed: false;
   ticketId: bigint;
   owner: Address;
   fromPosition: number;
@@ -66,7 +68,31 @@ export type SkipResult = {
   passed: { ticketId: bigint; owner: Address; amount: bigint }[];
   txHash: Hex;
   explorerUrl: string;
+  gasUsed: bigint;
+  /** Redeem token for the payer's ticket (null when the payment was refunded in full). */
+  token: string | null;
 };
+
+export type JoinResult = {
+  replayed: false;
+  ticketId: bigint;
+  owner: Address;
+  position: number;
+  skipPrice: bigint;
+  fee: bigint;
+  refund: bigint;
+  frontRun: boolean;
+  refundedInFull: boolean;
+  txHash: Hex;
+  explorerUrl: string;
+  gasUsed: bigint;
+  token: string | null;
+};
+
+/** A retried paid request that was already settled: same ticket, fresh token, nothing charged. */
+export type ReplayResult = { replayed: true; ticketId: bigint; owner: Address; position: number; token: string };
+
+type Fail = (status: number, reason: string, message: string, details?: Record<string, unknown>) => CheckoutError;
 
 const SIG_RE = /^0x[0-9a-fA-F]{130}$/;
 
@@ -102,9 +128,14 @@ export class Checkout {
   readonly relayer: Relayer | undefined;
   private readonly log: Log;
   private readonly joinLimiter: RateLimiter;
+  readonly tokens: TokenStore;
+  private joinFeeCache: { value: bigint; at: number } | undefined;
+  /** Called with the owners a skip just passed (the payout queue listens). */
+  onPassed: ((owners: Address[]) => void) | undefined;
 
-  constructor(cfg: Config, client: PublicClient, reader: QueueReader, relayer: Relayer | undefined, log: Log) {
+  constructor(cfg: Config, client: PublicClient, reader: QueueReader, relayer: Relayer | undefined, log: Log, tokens?: TokenStore) {
     this.joinLimiter = new RateLimiter(cfg.joinsPerMinute, 60_000);
+    this.tokens = tokens ?? new TokenStore(undefined, cfg.contract);
     this.cfg = cfg;
     this.client = client;
     this.reader = reader;
@@ -299,37 +330,84 @@ export class Checkout {
     };
   }
 
-  // ------------------------------------------------------------------ skip
+  // ------------------------------------------------------------------ x402 offers
 
-  skipResourceUrl(target: number, skipPrice?: bigint, owner?: Address): string {
+  /** The queue's join fee (USDC units), cached for a few seconds. */
+  async joinFee(): Promise<bigint> {
+    const now = Date.now();
+    if (this.joinFeeCache && now - this.joinFeeCache.at < 10_000) return this.joinFeeCache.value;
+    const value = await this.client.readContract({
+      address: this.cfg.contract,
+      abi: checkoutAbi,
+      functionName: "joinFee",
+      args: [this.cfg.queueId],
+    });
+    this.joinFeeCache = { value, at: now };
+    return value;
+  }
+
+  /** A posted skip price from a request, bounded by `maxSkipPrice`; the suggested price if absent. */
+  skipPriceFrom(raw: unknown): bigint {
+    if (raw === undefined || raw === null || raw === "") return this.cfg.suggestedSkipPrice;
+    const price = parseUint(raw, "skipPrice");
+    if (price > this.cfg.maxSkipPrice) {
+      throw new CheckoutError(400, "skip_price_too_high", `skipPrice is at most ${this.cfg.maxSkipPrice} units (${fmtUsd(this.cfg.maxSkipPrice)})`);
+    }
+    return price;
+  }
+
+  skipResourceUrl(target?: number, skipPrice?: bigint, owner?: Address): string {
     const u = new URL(`${this.cfg.publicUrl}/skip`);
-    u.searchParams.set("queue", String(this.cfg.queueId));
-    u.searchParams.set("target", String(target));
+    if (target !== undefined) {
+      u.searchParams.set("queue", String(this.cfg.queueId));
+      u.searchParams.set("target", String(target));
+    }
     if (skipPrice !== undefined) u.searchParams.set("skipPrice", skipPrice.toString());
     if (owner) u.searchParams.set("owner", owner);
     return u.toString();
   }
 
-  /** What a 402 for `POST /skip` advertises right now. `owner` only refines the quote. */
-  async skipOffer(target: number, owner?: Address, skipPrice?: bigint, maxAgeMs?: number): Promise<SkipOffer> {
+  /** A quote with its expiry, for /quote and the plugin. */
+  async quoteOffer(target: number, owner?: Address) {
+    const q = await this.quote(target, owner);
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      ...this.quoteJson(q),
+      owner: owner ?? null,
+      ticketId: q.ticketId,
+      slippageBps: this.cfg.slippageBps,
+      quotedAt: now,
+      quoteExpiresAt: now + this.cfg.quoteTtlS,
+      payTo: this.cfg.contract,
+      asset: this.cfg.usdc,
+      network: caip2(this.cfg.chainId),
+    };
+  }
+
+  /**
+   * What a 402 for `POST /skip` advertises right now. `owner` only refines the quote. `resourceUrl`
+   * defaults to the query form (the target travels in the URL); body requests pass the plain path.
+   */
+  async skipOffer(target: number, owner?: Address, skipPrice?: bigint, maxAgeMs?: number, resourceUrl?: string): Promise<SkipOffer> {
     const snap = await this.reader.get(maxAgeMs);
     const q = quoteSkip(snap, owner ?? null, target, this.cfg.slippageBps);
     if (isQuoteError(q)) throw new CheckoutError(409, q.error, q.message);
     const now = Math.floor(Date.now() / 1000);
-    const resourceUrl = this.skipResourceUrl(target, skipPrice, owner);
+    const resource = resourceUrl ?? this.skipResourceUrl(target, skipPrice, owner);
     const who = q.passes === 1 ? "the 1 agent" : `the ${q.passes} agents`;
     return {
       quote: q,
-      resourceUrl,
+      resourceUrl: resource,
       requirements: {
         chainId: this.cfg.chainId,
         asset: this.cfg.usdc,
         payTo: this.cfg.contract,
         amount: q.maxAmountRequired,
-        resourceUrl,
+        resourceUrl: resource,
         description: `x429: move from #${q.fromPosition} to #${target} in queue ${this.cfg.queueId}. Costs ${fmtUsd(q.cost)} now, paid to ${who} you pass; up to ${fmtUsd(q.maxAmountRequired)} is authorized and the unused part is refunded in the same transaction.`,
         maxTimeoutSeconds: this.cfg.paymentTimeoutS,
         quote: {
+          kind: "skip",
           queueId: this.cfg.queueId,
           fromPosition: q.fromPosition,
           targetPosition: target,
@@ -346,15 +424,45 @@ export class Checkout {
     };
   }
 
-  /**
-   * Verifies an x402 `exact` payment and settles it onchain with `skip`. Throws CheckoutError with
-   * an x402 error reason; nothing moves unless the result is returned.
-   */
-  async settleSkip(payment: DecodedPayment, target: number, newTicketSkipPrice: bigint): Promise<SkipResult> {
-    const relayer = this.requireRelayer();
+  /** What a 402 for `POST /join` advertises: the join fee (at least 1 unit; x402 needs a positive amount). */
+  async joinOffer(skipPrice: bigint): Promise<SkipOffer & { joinFee: bigint }> {
+    const [fee, snap] = await Promise.all([this.joinFee(), this.reader.get()]);
+    if (snap.length >= snap.maxLength) throw new CheckoutError(409, "queue_full", "the queue is full");
+    const amount = fee > 0n ? fee : 1n;
+    const now = Math.floor(Date.now() / 1000);
+    const resourceUrl = `${this.cfg.publicUrl}/join`;
+    const position = snap.length + 1;
+    return {
+      joinFee: fee,
+      quote: { owner: null, ticketId: null, fromPosition: position, targetPosition: position, passes: 0, compensation: 0n, fee, cost: fee, maxAmountRequired: amount, passed: [] },
+      resourceUrl,
+      requirements: {
+        chainId: this.cfg.chainId,
+        asset: this.cfg.usdc,
+        payTo: this.cfg.contract,
+        amount,
+        resourceUrl,
+        description: `x429: join queue ${this.cfg.queueId} at #${position} for ${fmtUsd(fee)}, posting a skip price of ${fmtUsd(skipPrice)} (what anyone who passes you pays you).`,
+        maxTimeoutSeconds: this.cfg.paymentTimeoutS,
+        quote: {
+          kind: "join",
+          queueId: this.cfg.queueId,
+          position,
+          joinFee: fee.toString(),
+          skipPrice: skipPrice.toString(),
+          quotedAt: now,
+          quoteExpiresAt: now + this.cfg.quoteTtlS,
+        },
+      },
+    };
+  }
+
+  // ------------------------------------------------------------------ x402 settlement
+
+  /** Checks that need no chain state: scheme, network, accepted requirements, recipient, signature. */
+  private async verifyPayment(payment: DecodedPayment) {
     const { authorization: auth, signature } = payment.payload;
-    const fail = (status: number, reason: string, message: string, details?: Record<string, unknown>) =>
-      new CheckoutError(status, reason, message, { payer: auth.from, ...details });
+    const fail: Fail = (status, reason, message, details) => new CheckoutError(status, reason, message, { payer: auth.from, ...details });
 
     if (payment.scheme !== "exact") throw fail(400, "invalid_scheme", `scheme must be "exact"`);
     const networks = new Set([caip2(this.cfg.chainId), v1Network(this.cfg.chainId)]);
@@ -369,7 +477,7 @@ export class Checkout {
       }
       const quote = (a.extra?.x429 ?? {}) as { quoteExpiresAt?: number };
       if (typeof quote.quoteExpiresAt === "number" && quote.quoteExpiresAt < Date.now() / 1000) {
-        throw fail(402, "quote_expired", "the accepted quote has expired; request /skip again for a fresh 402");
+        throw fail(402, "quote_expired", "the accepted quote has expired; request the resource again for a fresh 402");
       }
     }
     if (auth.to.toLowerCase() !== this.cfg.contract.toLowerCase()) {
@@ -384,47 +492,101 @@ export class Checkout {
       signature,
     }).catch(() => false);
     if (!validSig) throw fail(402, "invalid_exact_evm_payload_signature", "the EIP-3009 signature does not recover to authorization.from");
+    return { auth, fail };
+  }
 
+  /**
+   * Chain checks, run inside `exclusive`: replay, front-run, time window, balance. If the payment was
+   * already settled by us and is still inside its authorization window, returns the ticket it produced
+   * (a retried request, e.g. the paid response got lost).
+   */
+  private async preflight(auth: Authorization, fail: Fail): Promise<{ frontRun: boolean; replayOf?: bigint }> {
+    const [block, settled, used] = await Promise.all([
+      this.client.getBlock(),
+      this.client.readContract({ address: this.cfg.contract, abi: checkoutAbi, functionName: "paymentSettled", args: [auth.from, auth.nonce] }),
+      this.client.readContract({ address: this.cfg.usdc, abi: usdcAbi, functionName: "authorizationState", args: [auth.from, auth.nonce] }),
+    ]);
+    const chainNow = block.timestamp;
+    if (settled) {
+      const ticketId = this.tokens.paymentTicket(auth.from, auth.nonce);
+      if (ticketId !== undefined && auth.validBefore > chainNow) return { frontRun: false, replayOf: ticketId };
+      throw fail(402, "payment_already_settled", "this payment was already settled (replay)");
+    }
+    if (used) {
+      // someone submitted the authorization straight to USDC. Only settle it if that transfer
+      // really paid this contract (a cancelled authorization also marks the nonce used). Its time
+      // window no longer matters: the money already moved and must be applied or refunded.
+      if (!(await this.frontRunPaidUs(auth.from, auth.nonce, auth.value))) {
+        throw fail(402, "invalid_transaction_state", "this authorization was already used or cancelled elsewhere");
+      }
+      this.log({ evt: "front_run_detected", payer: auth.from, nonce: auth.nonce, value: auth.value });
+      return { frontRun: true };
+    }
+    if (auth.validBefore <= chainNow + 2n) {
+      throw fail(402, "invalid_exact_evm_payload_authorization_valid_before", "the payment authorization has expired");
+    }
+    if (auth.validAfter >= chainNow + 1n) {
+      throw fail(402, "invalid_exact_evm_payload_authorization_valid_after", "the payment authorization is not valid yet");
+    }
+    const balance = await this.client.readContract({ address: this.cfg.usdc, abi: usdcAbi, functionName: "balanceOf", args: [auth.from] });
+    if (balance < auth.value) throw fail(402, "insufficient_funds", `the payer holds ${fmtUsd(balance)}, the authorization is for ${fmtUsd(auth.value)}`);
+    return { frontRun: false };
+  }
+
+  private authTuple(payment: DecodedPayment) {
+    const { authorization: auth, signature } = payment.payload;
+    const { r, s, v, yParity } = parseSignature(signature);
+    return {
+      from: auth.from,
+      value: auth.value,
+      validAfter: auth.validAfter,
+      validBefore: auth.validBefore,
+      nonce: auth.nonce,
+      v: Number(v ?? BigInt(yParity + 27)),
+      r,
+      s,
+    };
+  }
+
+  /** Sends a settlement transaction and maps its failures to x402 errors. Inside `exclusive`. */
+  private async settle(fn: string, args: readonly unknown[], note: string, fail: Fail): Promise<TransactionReceipt> {
+    try {
+      return await this.requireRelayer().call(fn, args, note);
+    } catch (err) {
+      if (err instanceof RevertError && err.errorName === "CostExceedsPayment") {
+        const [cost, value] = err.args as [bigint, bigint];
+        throw fail(402, "price_moved", `the price moved: the skip now costs ${fmtUsd(cost)}, above the ${fmtUsd(value)} you signed. Nothing was charged.`, { cost, signed: value });
+      }
+      if (err instanceof RevertError && err.errorName === "AlreadyWaiting") {
+        throw fail(409, "already_waiting", "you already have a waiting ticket; use /skip to move up. Nothing was charged.");
+      }
+      if (err instanceof RevertError) throw fail(402, "invalid_transaction_state", `settlement would revert: ${err.errorName} ${err.message}`);
+      if (err instanceof PendingTxError) {
+        throw fail(504, "settlement_pending", "the settlement transaction was sent but is not confirmed yet; check the transaction before paying again", { txHash: err.hash });
+      }
+      throw err;
+    }
+  }
+
+  /** The answer to a retried, already settled payment: the same ticket, a fresh token, nothing charged. */
+  private async replayResult(ticketId: bigint, payer: Address): Promise<ReplayResult> {
+    const snap = await this.reader.get(0);
+    const row = snap.tickets.find((t) => t.id === ticketId);
+    this.log({ evt: "paid_request_retried", payer, ticketId });
+    return { replayed: true, ticketId, owner: payer, position: row?.position ?? 0, token: this.tokens.issue(ticketId, payer) };
+  }
+
+  /**
+   * Verifies an x402 `exact` payment and settles it onchain with `skip`. Throws CheckoutError with
+   * an x402 error reason; nothing moves unless the result is returned.
+   */
+  async settleSkip(payment: DecodedPayment, target: number, newTicketSkipPrice: bigint): Promise<SkipResult | ReplayResult> {
+    const relayer = this.requireRelayer();
+    const { auth, fail } = await this.verifyPayment(payment);
     return relayer.exclusive(async () => {
-      const [block, settled, used] = await Promise.all([
-        this.client.getBlock(),
-        this.client.readContract({
-          address: this.cfg.contract,
-          abi: checkoutAbi,
-          functionName: "paymentSettled",
-          args: [auth.from, auth.nonce],
-        }),
-        this.client.readContract({
-          address: this.cfg.usdc,
-          abi: usdcAbi,
-          functionName: "authorizationState",
-          args: [auth.from, auth.nonce],
-        }),
-      ]);
-      if (settled) throw fail(402, "payment_already_settled", "this payment was already used for a skip (replay)");
-      let frontRun = false;
-      if (used) {
-        // someone submitted the authorization straight to USDC. Only settle it if that transfer
-        // really paid this contract (a cancelled authorization also marks the nonce used). Its time
-        // window no longer matters: the money already moved and must be applied or refunded.
-        frontRun = await this.frontRunPaidUs(auth.from, auth.nonce, auth.value);
-        if (!frontRun) throw fail(402, "invalid_transaction_state", "this authorization was already used or cancelled elsewhere");
-        this.log({ evt: "front_run_detected", payer: auth.from, nonce: auth.nonce, value: auth.value });
-      } else {
-        const chainNow = block.timestamp;
-        if (auth.validBefore <= chainNow + 2n) {
-          throw fail(402, "invalid_exact_evm_payload_authorization_valid_before", "the payment authorization has expired");
-        }
-        if (auth.validAfter >= chainNow + 1n) {
-          throw fail(402, "invalid_exact_evm_payload_authorization_valid_after", "the payment authorization is not valid yet");
-        }
-        const balance = await this.client.readContract({
-          address: this.cfg.usdc,
-          abi: usdcAbi,
-          functionName: "balanceOf",
-          args: [auth.from],
-        });
-        if (balance < auth.value) throw fail(402, "insufficient_funds", `the payer holds ${fmtUsd(balance)}, the authorization is for ${fmtUsd(auth.value)}`);
+      const { frontRun, replayOf } = await this.preflight(auth, fail);
+      if (replayOf !== undefined) return this.replayResult(replayOf, auth.from);
+      if (!frontRun) {
         const snap = await this.reader.refresh();
         const q = quoteSkip(snap, auth.from, target, this.cfg.slippageBps);
         if (isQuoteError(q)) throw fail(409, q.error, q.message);
@@ -435,38 +597,74 @@ export class Checkout {
           });
         }
       }
-
-      const { r, s, v, yParity } = parseSignature(signature);
-      const authTuple = {
-        from: auth.from,
-        value: auth.value,
-        validAfter: auth.validAfter,
-        validBefore: auth.validBefore,
-        nonce: auth.nonce,
-        v: Number(v ?? BigInt(yParity + 27)),
-        r,
-        s,
-      };
-      let receipt: TransactionReceipt;
-      try {
-        receipt = await relayer.call("skip", [this.cfg.queueId, target, newTicketSkipPrice, authTuple], frontRun ? "skip (front-run)" : "skip");
-      } catch (err) {
-        if (err instanceof RevertError && err.errorName === "CostExceedsPayment") {
-          const [cost, value] = err.args as [bigint, bigint];
-          throw fail(402, "price_moved", `the price moved: the skip now costs ${fmtUsd(cost)}, above the ${fmtUsd(value)} you signed. Nothing was charged.`, { cost, signed: value });
-        }
-        if (err instanceof RevertError) throw fail(402, "invalid_transaction_state", `settlement would revert: ${err.errorName} ${err.message}`);
-        if (err instanceof PendingTxError) {
-          throw fail(504, "settlement_pending", "the settlement transaction was sent but is not confirmed yet; check the transaction before paying again", { txHash: err.hash });
-        }
-        throw err;
-      }
+      const receipt = await this.settle("skip", [this.cfg.queueId, target, newTicketSkipPrice, this.authTuple(payment)], frontRun ? "skip (front-run)" : "skip", fail);
       await this.reader.atLeast(receipt.blockNumber).catch(() => undefined);
       const result = this.parseSkipReceipt(receipt, auth.from, frontRun);
       const joinedNote = result.ticketSkipPrice !== null ? ", join + skip" : "";
       relayer.annotate(receipt.transactionHash, `${result.passes} passes${joinedNote}${frontRun ? ", front-run settle" : ""}`);
+      if (!result.refundedInFull) {
+        this.tokens.recordPayment(auth.from, auth.nonce, result.ticketId, receipt.transactionHash);
+        result.token = this.tokens.issue(result.ticketId, auth.from);
+        this.onPassed?.(result.passed.map((p) => p.owner));
+      }
       return result;
     });
+  }
+
+  /** Verifies an x402 `exact` payment and settles it as a join (`joinPaid`) for its payer. */
+  async settleJoin(payment: DecodedPayment, skipPrice: bigint): Promise<JoinResult | ReplayResult> {
+    const relayer = this.requireRelayer();
+    const { auth, fail } = await this.verifyPayment(payment);
+    return relayer.exclusive(async () => {
+      const { frontRun, replayOf } = await this.preflight(auth, fail);
+      if (replayOf !== undefined) return this.replayResult(replayOf, auth.from);
+      if (!frontRun) {
+        const [snap, fee] = await Promise.all([this.reader.refresh(), this.joinFee()]);
+        const mine = snap.tickets.find((t) => t.owner.toLowerCase() === auth.from.toLowerCase());
+        if (mine) {
+          throw fail(409, "already_waiting", `you already wait as ticket #${mine.id} at position ${mine.position}; use /skip to move up. Nothing was charged.`, {
+            ticketId: mine.id,
+            position: mine.position,
+          });
+        }
+        if (snap.length >= snap.maxLength) throw fail(409, "queue_full", "the queue is full. Nothing was charged.");
+        if (auth.value < fee) throw fail(402, "join_fee_not_covered", `joining costs ${fmtUsd(fee)}, the authorization is for ${fmtUsd(auth.value)}`);
+      }
+      const receipt = await this.settle("joinPaid", [this.cfg.queueId, skipPrice, this.authTuple(payment)], frontRun ? "joinPaid (front-run)" : "joinPaid", fail);
+      await this.reader.atLeast(receipt.blockNumber).catch(() => undefined);
+      const logs = parseEventLogs({ abi: checkoutAbi, logs: receipt.logs });
+      const joined = logs.find((l) => l.eventName === "Joined");
+      const paid = logs.find((l) => l.eventName === "JoinPaid");
+      const base = { replayed: false as const, owner: auth.from, frontRun, skipPrice, txHash: receipt.transactionHash, explorerUrl: this.explorerTx(receipt.transactionHash), gasUsed: receipt.gasUsed };
+      if (joined?.eventName !== "Joined" || paid?.eventName !== "JoinPaid") {
+        this.log({ evt: "front_run_refunded", payer: auth.from, value: auth.value, tx: receipt.transactionHash });
+        return { ...base, ticketId: 0n, position: 0, fee: 0n, refund: auth.value, refundedInFull: true, token: null };
+      }
+      this.reader.markSeen(joined.args.ticketId);
+      this.tokens.recordPayment(auth.from, auth.nonce, joined.args.ticketId, receipt.transactionHash);
+      this.log({ evt: "joined_paid", owner: auth.from, ticketId: joined.args.ticketId, position: joined.args.position, fee: paid.args.fee, tx: receipt.transactionHash, gasUsed: receipt.gasUsed });
+      return {
+        ...base,
+        ticketId: joined.args.ticketId,
+        position: joined.args.position,
+        fee: paid.args.fee,
+        refund: paid.args.refund,
+        refundedInFull: false,
+        token: this.tokens.issue(joined.args.ticketId, auth.from),
+      };
+    });
+  }
+
+  /** Pushes each owner's claimable to that owner (operator `payoutBatch`, at most 64 per transaction). */
+  async payout(owners: Address[]) {
+    const relayer = this.requireRelayer();
+    const receipt = await relayer.exclusive(() => relayer.call("payoutBatch", [owners], "payoutBatch")).catch(mapRevert);
+    const logs = parseEventLogs({ abi: checkoutAbi, logs: receipt.logs });
+    const paid = logs.flatMap((l) => (l.eventName === "PaidOut" ? [{ owner: l.args.owner, amount: l.args.amount }] : []));
+    const failed = logs.flatMap((l) => (l.eventName === "PayoutFailed" ? [l.args.owner] : []));
+    relayer.annotate(receipt.transactionHash, `${owners.length} owners, ${paid.length} paid`);
+    this.log({ evt: "paid_out", paid, failed, tx: receipt.transactionHash, gasUsed: receipt.gasUsed });
+    return { paid, failed, txHash: receipt.transactionHash, gasUsed: receipt.gasUsed };
   }
 
   /**
@@ -522,12 +720,15 @@ export class Checkout {
       .filter((x) => x !== null);
     const joined = logs.find((l) => l.eventName === "Joined");
     const base = {
+      replayed: false as const,
       owner: payer,
       txHash: receipt.transactionHash,
       explorerUrl: this.explorerTx(receipt.transactionHash),
       frontRun,
       passed,
       ticketSkipPrice: joined?.eventName === "Joined" ? joined.args.skipPrice : null,
+      gasUsed: receipt.gasUsed,
+      token: null as string | null,
     };
     if (skipped?.eventName === "Skipped") {
       const a = skipped.args;

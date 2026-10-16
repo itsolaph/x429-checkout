@@ -1,9 +1,10 @@
-// Indexes contract events for the dashboard: who joined, who skipped, who got paid what, and claims.
+// Indexes contract events for the dashboard and /earnings: who joined, who skipped, who earned what,
+// and what reached their wallets (operator payouts and claims).
 import { parseEventLogs, type Address, type PublicClient } from "viem";
 import { checkoutAbi } from "./abi.ts";
 
 export type FeedEvent = {
-  kind: "joined" | "skipped" | "passed" | "served" | "claimed" | "left" | "refunded";
+  kind: "joined" | "skipped" | "passed" | "served" | "claimed" | "paid_out" | "left" | "refunded";
   block: bigint;
   time: number; // seconds
   tx: `0x${string}`;
@@ -18,11 +19,16 @@ export type FeedTotals = {
   paidToWaiting: bigint; // sum of Passed amounts
   fees: bigint;
   claimed: bigint;
+  /** Sent to owners by the operator (payout). */
+  paidOut: bigint;
   skips: number;
   passes: number;
   served: number;
   joins: number;
   earnedBy: Record<string, bigint>;
+  passesBy: Record<string, number>;
+  /** Payouts and claims, by owner. */
+  receivedBy: Record<string, bigint>;
 };
 
 const KINDS: Record<string, FeedEvent["kind"]> = {
@@ -31,13 +37,15 @@ const KINDS: Record<string, FeedEvent["kind"]> = {
   Passed: "passed",
   Served: "served",
   Claimed: "claimed",
+  PaidOut: "paid_out",
+  JoinPaid: "joined",
   Left: "left",
   PaymentRefunded: "refunded",
 };
 
 export class Feed {
   readonly events: FeedEvent[] = [];
-  readonly totals: FeedTotals = { paidToWaiting: 0n, fees: 0n, claimed: 0n, skips: 0, passes: 0, served: 0, joins: 0, earnedBy: {} };
+  readonly totals: FeedTotals = { paidToWaiting: 0n, fees: 0n, claimed: 0n, paidOut: 0n, skips: 0, passes: 0, served: 0, joins: 0, earnedBy: {}, passesBy: {}, receivedBy: {} };
   private next: bigint;
   private timer: ReturnType<typeof setInterval> | undefined;
   private busy = false;
@@ -130,6 +138,19 @@ export class Feed {
         t.paidToWaiting += log.args.amount;
         const key = log.args.passedOwner.toLowerCase();
         t.earnedBy[key] = (t.earnedBy[key] ?? 0n) + log.args.amount;
+        t.passesBy[key] = (t.passesBy[key] ?? 0) + 1;
+        break;
+      }
+      case "JoinPaid":
+        // the Joined event of the same transaction is the feed entry; this one only books the fee
+        t.fees += log.args.fee;
+        return;
+      case "PaidOut": {
+        ev.owner = log.args.owner;
+        ev.amount = log.args.amount;
+        t.paidOut += log.args.amount;
+        const key = log.args.owner.toLowerCase();
+        t.receivedBy[key] = (t.receivedBy[key] ?? 0n) + log.args.amount;
         break;
       }
       case "Served":
@@ -141,6 +162,7 @@ export class Feed {
         ev.owner = log.args.owner;
         ev.amount = log.args.amount;
         t.claimed += log.args.amount;
+        t.receivedBy[log.args.owner.toLowerCase()] = (t.receivedBy[log.args.owner.toLowerCase()] ?? 0n) + log.args.amount;
         break;
       case "Left":
         ev.ticketId = log.args.ticketId;

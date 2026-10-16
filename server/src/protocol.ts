@@ -1,7 +1,7 @@
 // Protocol constants and EIP-712 payload builders shared by the server, the MCP tools and agent-sim.
 import { formatUnits, parseUnits, type Address, type Hex } from "viem";
 
-export const PROTOCOL_VERSION = "0.2";
+export const PROTOCOL_VERSION = "0.3";
 export const BASE_CHAIN_ID = 8453;
 /** Native USDC on Base mainnet (FiatTokenV2_2, 6 decimals, EIP-3009). */
 export const BASE_USDC: Address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";

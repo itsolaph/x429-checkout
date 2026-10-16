@@ -7,6 +7,8 @@ import { Checkout } from "./checkout.ts";
 import { loadConfig } from "./config.ts";
 import { Feed } from "./feed.ts";
 import { Gate } from "./gate.ts";
+import { Payouts } from "./payouts.ts";
+import { TokenStore } from "./tokens.ts";
 import { toJson } from "./json.ts";
 import { QueueReader } from "./queue.ts";
 
@@ -28,14 +30,17 @@ if (relayer && operator.toLowerCase() !== relayer.address.toLowerCase()) {
   throw new Error(`operator key ${relayer.address} is not the operator of ${cfg.contract} (${operator})`);
 }
 
-const checkout = new Checkout(cfg, client, reader, relayer, log);
+const tokens = new TokenStore(cfg.dataDir ? resolve(cfg.dataDir) : undefined, cfg.contract);
+const checkout = new Checkout(cfg, client, reader, relayer, log, tokens);
 const gate = new Gate(checkout, log);
 const feed = new Feed(client, cfg.contract, cfg.queueId, cfg.deployBlock);
-const server = createApp({ checkout, gate, feed, log, siteDir: cfg.siteDir ? resolve(cfg.siteDir) : undefined });
+const payouts = new Payouts(checkout, feed, log);
+const server = createApp({ checkout, gate, feed, log, payouts, siteDir: cfg.siteDir ? resolve(cfg.siteDir) : undefined });
 
 setInterval(() => void reader.refresh().catch(() => {}), cfg.pollMs);
 gate.start();
 feed.start(cfg.pollMs);
+if (cfg.autoPayout) payouts.start(cfg.payoutIntervalMs);
 server.listen(cfg.port, cfg.host, () => {
   log({
     evt: "listening",
@@ -52,6 +57,7 @@ server.listen(cfg.port, cfg.host, () => {
 const shutdown = () => {
   gate.stop();
   feed.stop();
+  payouts.stop();
   server.close();
   setTimeout(() => process.exit(0), 200).unref();
 };

@@ -27,6 +27,13 @@ export type Config = {
   /** How long a quote's ceiling is honoured (covers the passkey approval). */
   quoteTtlS: number;
   suggestedSkipPrice: bigint;
+  /** Highest skip price a paid join or skip may post (bounds what a newcomer can make others pay). */
+  maxSkipPrice: bigint;
+  /** Where redeem tokens (hashed) are kept across restarts; unset keeps them in memory. */
+  dataDir: string | undefined;
+  /** Push compensation to passed owners automatically (operator payoutBatch). */
+  autoPayout: boolean;
+  payoutIntervalMs: number;
   /** Relayed joins per minute per client IP (each costs the operator gas). */
   joinsPerMinute: number;
   pollMs: number;
@@ -80,11 +87,15 @@ export function loadConfig(): Config {
     explorer: env("X429_EXPLORER", "https://basescan.org").replace(/\/$/, ""),
     serviceIntervalMs: interval,
     minQueueMs: int("X429_MIN_QUEUE_MS", interval),
-    admissionTtlMs: int("X429_ADMISSION_TTL_MS", 60_000),
+    admissionTtlMs: int("X429_ADMISSION_TTL_MS", 300_000),
     slippageBps: int("X429_SLIPPAGE_BPS", 2_000),
     paymentTimeoutS: int("X429_PAYMENT_TIMEOUT_S", 120),
     quoteTtlS: int("X429_QUOTE_TTL_S", 600),
     suggestedSkipPrice: usdc(env("X429_SUGGESTED_SKIP_PRICE", "0.005")),
+    maxSkipPrice: usdc(env("X429_MAX_SKIP_PRICE", "0.1")),
+    dataDir: process.env.X429_DATA_DIR || undefined,
+    autoPayout: env("X429_AUTO_PAYOUT", "1") !== "0",
+    payoutIntervalMs: int("X429_PAYOUT_INTERVAL_MS", 3_000),
     joinsPerMinute: int("X429_JOINS_PER_MINUTE", 30),
     pollMs: int("X429_POLL_MS", 1_000),
     deployBlock: BigInt(env("X429_DEPLOY_BLOCK", "0")),

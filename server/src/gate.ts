@@ -1,8 +1,9 @@
 // The admission gate in front of the busy API, and the operator loop that serves the queue head.
 //
-// One request is admitted per service interval. A request without ticket headers is admitted only
-// when the queue is empty and the service is idle; otherwise it gets 429 with an x429 descriptor
-// that prices a skip. Served tickets redeem one request with an EIP-191 signature of their owner.
+// One request is admitted per service interval. A request without a ticket is admitted only when the
+// queue is empty and the service is idle; otherwise it gets 429 with an x429 descriptor that prices a
+// skip. A served ticket redeems one request, either with the redeem token from its paid join/skip
+// (`POST /use`, the PayBox plugin path) or with an EIP-191 signature of its owner (headers).
 import type { IncomingMessage } from "node:http";
 import { parseEventLogs, verifyMessage, type Address, type Hash, type Hex } from "viem";
 import { checkoutAbi } from "./abi.ts";
@@ -20,7 +21,16 @@ export type Admission = {
   timesPassed: number;
   earned: bigint;
   paid: bigint;
+  /** Set once the ticket used its request; repeated uses inside the admission window get the same answer. */
+  result?: unknown;
 };
+
+/** Where a ticket stands for its owner, without using it. */
+export type TicketStatus =
+  | { status: "waiting"; ticketId: bigint; position: number; etaSeconds: number }
+  | { status: "ready" | "used"; ticketId: bigint; admission: Admission; expiresInSeconds: number }
+  | { status: "serving"; ticketId: bigint; etaSeconds: number }
+  | { status: "expired" | "left" | "unknown"; ticketId: bigint };
 
 export type GateDecision =
   | { kind: "admit"; via: "direct" | "queue"; admission?: Admission }
@@ -114,14 +124,27 @@ export class Gate {
       join: {
         method: "POST",
         url: `${cfg.publicUrl}/join`,
-        typedData: `${cfg.publicUrl}/join/typed-data?owner=<address>&skipPrice=<units>`,
-        gasless: true,
+        body: { skipPrice: "<USDC units you are paid each time someone passes you>" },
+        payment: "x402 exact: a small join fee, the rest refunded; the response carries your redeem token",
+        maxSkipPrice: cfg.maxSkipPrice.toString(),
       },
-      redeem: {
+      use: {
+        method: "POST",
+        url: `${cfg.publicUrl}/use`,
+        body: { token: "<redeem token from the paid /join or /skip response>" },
+        answers: "429 with position and ETA while you wait; 200 with the API result once you are served",
+      },
+      redeemWithSignature: {
         headers: [TICKET_HEADER, SIGNATURE_HEADER],
         message: ticketMessage(cfg.chainId, cfg.contract, "<ticketId>"),
-        scheme: "EIP-191 personal_sign by the ticket owner",
+        scheme: "EIP-191 personal_sign by the ticket owner (alternative to the token)",
       },
+      gaslessJoin: {
+        method: "POST",
+        url: `${cfg.publicUrl}/join/signed`,
+        typedData: `${cfg.publicUrl}/join/typed-data?owner=<address>&skipPrice=<units>`,
+      },
+      payouts: cfg.autoPayout ? "automatic: whoever passes you pays you, and the operator sends it to your wallet" : "claim",
       mcp: `${cfg.publicUrl}/mcp`,
     };
   }
@@ -192,6 +215,7 @@ export class Gate {
     if (this.consumed.has(id)) return this.forbidden("ticket_used_or_expired", id);
 
     const adm = this.admissions.get(id);
+    if (adm?.result !== undefined) return this.forbidden("ticket_used_or_expired", id);
     if (adm) {
       const ok = await verifyMessage({ address: adm.owner, message, signature: sig }).catch(() => false);
       if (!ok) return this.forbidden("bad_signature", id);
@@ -221,6 +245,49 @@ export class Gate {
       return this.tooMany(this.checkout.reader.latest, { id: id.toString(), status: "serving", position: 0 }, 1, 0);
     }
     return this.forbidden(status === 2 ? "not_admitted" : "ticket_left", id);
+  }
+
+  /** Where ticket `id` stands, without using it. */
+  async inspect(id: bigint): Promise<TicketStatus> {
+    this.sweep();
+    const adm = this.admissions.get(id);
+    if (adm) {
+      const expiresInSeconds = Math.max(0, Math.ceil((adm.expiresAt - Date.now()) / 1000));
+      return { status: adm.result === undefined ? "ready" : "used", ticketId: id, admission: adm, expiresInSeconds };
+    }
+    if (this.consumed.has(id)) return { status: "expired", ticketId: id };
+    const t = await this.checkout.client.readContract({ address: this.cfg.contract, abi: checkoutAbi, functionName: "tickets", args: [id] });
+    const [, queueId, status] = t;
+    if (status === 0 || queueId !== this.cfg.queueId) return { status: "unknown", ticketId: id };
+    if (status === 1) {
+      let snap = await this.checkout.reader.get().catch(() => this.checkout.reader.latest);
+      if (!snap?.tickets.some((x) => x.id === id)) snap = await this.checkout.reader.refresh().catch(() => snap);
+      const position = snap?.tickets.find((x) => x.id === id)?.position ?? 0;
+      if (position === 0) return { status: "serving", ticketId: id, etaSeconds: 1 }; // being served right now
+      return { status: "waiting", ticketId: id, position, etaSeconds: this.etaSeconds(position, snap) };
+    }
+    if (status === 2) {
+      // served onchain: the admission is recorded as soon as the serve receipt is in
+      return this.serving ? { status: "serving", ticketId: id, etaSeconds: 1 } : { status: "expired", ticketId: id };
+    }
+    return { status: "left", ticketId: id };
+  }
+
+  /**
+   * Uses a served ticket's request (token path). `make` builds the API answer once; using the ticket
+   * again inside its admission window returns that same answer, so a lost response is not a lost request.
+   */
+  async use(id: bigint, make: (adm: Admission) => unknown): Promise<TicketStatus & { result?: unknown; replayed?: boolean }> {
+    const st = await this.inspect(id);
+    if (st.status !== "ready" && st.status !== "used") return st;
+    const adm = st.admission;
+    const replayed = adm.result !== undefined;
+    if (!replayed) {
+      adm.result = make(adm);
+      this.stats.queued++;
+      this.log({ evt: "admit", via: "token", ticketId: id, owner: adm.owner, waited: adm.waited });
+    }
+    return { ...st, status: "used", result: adm.result, replayed };
   }
 
   /** Serves the head when the service is free and the head's admission round is over. */
