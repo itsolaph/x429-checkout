@@ -24,18 +24,27 @@
     <main>
       <section class="hero">
         <div class="hero-main">
-          <p class="eyebrow">Paid to agents who waited</p>
+          <p class="eyebrow">Paid to agents waiting</p>
           <p class="big" id="paid-total">$0</p>
-          <p class="sub" id="hero-sub">Every skip pays each ticket it passes that ticket's own price, in USDC, in the same transaction.</p>
+          <p class="sub" id="hero-sub">429 is the new 402: agents pay to skip the line, and everyone they pass gets paid. Each passed ticket gets its own posted price, in USDC on Base, pushed to its wallet.</p>
         </div>
         <dl class="stats">
           <div><dt>in line</dt><dd id="s-length">0</dd></div>
           <div><dt>skips</dt><dd id="s-skips">0</dd></div>
           <div><dt>tickets passed</dt><dd id="s-passes">0</dd></div>
           <div><dt>served</dt><dd id="s-served">0</dd></div>
-          <div><dt>claimed</dt><dd id="s-claimed">$0</dd></div>
+          <div><dt>in wallets</dt><dd id="s-claimed">$0</dd></div>
           <div><dt>operator fees</dt><dd id="s-fees">$0</dd></div>
         </dl>
+      </section>
+
+      <section class="panel lastskip" id="lastskip" hidden>
+        <div class="panel-head">
+          <h2>Last skip</h2>
+          <a class="hint mono" id="lastskip-tx" target="_blank" rel="noopener"></a>
+        </div>
+        <p class="headline" id="lastskip-headline"></p>
+        <ul class="payouts" id="lastskip-payouts"></ul>
       </section>
 
       <section class="grid">
@@ -72,7 +81,7 @@
     <footer>
       <p>
         HTTP 429 with a price. A waiting agent posts what it wants for being passed; anyone may move ahead by paying every
-        ticket it passes. Payments are x402 (EIP-3009 USDC on Base), joins and claims are gasless signatures.
+        ticket it passes. Payments are x402 (EIP-3009 USDC on Base); the operator pushes each payout to its wallet. Demo agents are labeled.
       </p>
       <p class="mono small" id="source"></p>
     </footer>

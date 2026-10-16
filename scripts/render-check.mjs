@@ -31,10 +31,17 @@ const checks = [
   ["line rows", document.querySelectorAll("#queue li").length === feed.queue.tickets.length],
   ["earners rows", document.querySelectorAll("#earners tr").length === Object.keys(feed.totals.earnedBy).length],
   ["demo agents labeled", (feed.demoAgents ?? []).length === 0 || [...document.querySelectorAll("#queue li, #earners tr")].some((n) => n.textContent.includes("(demo agent)"))],
+  ["last skip headline", /^Skipped ~\d+s; \d+ agents? earned \$[0-9.]+$/.test(text("lastskip-headline"))],
+  ["last skip payouts", (() => {
+    const skip = feed.events.find((e) => e.kind === "skipped");
+    return !!skip && document.querySelectorAll("#lastskip-payouts li").length === feed.events.filter((e) => e.kind === "passed" && e.tx === skip.tx).length;
+  })()],
+  ["last skip basescan link", document.getElementById("lastskip-tx").getAttribute("href").startsWith(`${feed.explorer}/tx/0x`)],
   ["explorer links", [...document.querySelectorAll("#feed a")].every((a) => a.getAttribute("href").startsWith(`${feed.explorer}/tx/0x`))],
 ];
 const failed = checks.filter(([, ok]) => !ok);
 for (const [name, ok] of checks) console.log(`[render] ${ok ? "ok  " : "FAIL"} ${name}`);
+console.log(`[render] ${text("lastskip-headline")} (${document.querySelectorAll("#lastskip-payouts li").length} payouts)`);
 console.log(`[render] paid to people waiting ${text("paid-total")}, ${document.querySelectorAll("#feed li").length} ledger rows, ${document.querySelectorAll("#queue li").length} in line`);
 // keep the html template honest too
 if (!readFileSync(join(root, "site/index.html"), "utf8").includes('src="app.js"')) failed.push(["script tag"]);

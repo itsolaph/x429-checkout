@@ -10,7 +10,8 @@ type FeedResponse = {
   explorer: string;
   /** The operator's own demo agents (lowercase addresses), labeled in every panel. */
   demoAgents?: string[];
-  totals: { paidToWaiting: string; fees: string; claimed: string; skips: number; passes: number; served: number; joins: number; earnedBy: Record<string, string> };
+  serviceIntervalMs?: number;
+  totals: { paidToWaiting: string; fees: string; claimed: string; paidOut?: string; skips: number; passes: number; served: number; joins: number; earnedBy: Record<string, string> };
   queue: { length: number; feeBps: number; tickets: Ticket[] };
   events: FeedEvent[];
 };
@@ -157,6 +158,71 @@ function renderEarners(f: FeedResponse) {
   );
 }
 
+/** The headline number counts up to its new value (instantly without animation support). */
+let shown = -1n;
+function ticker(total: bigint) {
+  const node = $("paid-total");
+  const raf = (globalThis as { requestAnimationFrame?: (cb: (t: number) => void) => number }).requestAnimationFrame;
+  if (shown < 0n || total <= shown || !raf) {
+    shown = total;
+    node.textContent = usd(total);
+    return;
+  }
+  const from = Number(shown);
+  const to = Number(total);
+  shown = total;
+  node.classList.remove("bump");
+  void node.offsetWidth;
+  node.classList.add("bump");
+  const start = performance.now();
+  const step = (t: number) => {
+    const k = Math.min(1, (t - start) / 900);
+    const eased = 1 - (1 - k) ** 3;
+    node.textContent = k < 1 ? usd(Math.round(from + (to - from) * eased)) : usd(total);
+    if (k < 1) raf(step);
+  };
+  raf(step);
+}
+
+let lastSkipTx = "";
+/** The newest skip: one headline ("skipped ~Ns; K agents earned $X") and each ticket's payout landing. */
+function renderLastSkip(f: FeedResponse) {
+  const skip = f.events.find((e) => e.kind === "skipped");
+  const box = $("lastskip");
+  if (!skip) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const passed = f.events.filter((e) => e.kind === "passed" && e.tx === skip.tx).reverse();
+  const inWallet = new Set(f.events.filter((e) => e.kind === "paid_out" && BigInt(e.block) >= BigInt(skip.block)).map((e) => (e.owner ?? "").toLowerCase()));
+  const places = Number(skip.data.fromPosition) - Number(skip.data.toPosition);
+  const saved = Math.round((places * (f.serviceIntervalMs ?? 0)) / 1000);
+  $("lastskip-headline").replaceChildren(
+    `Skipped ~${saved}s; ${passed.length} agent${passed.length === 1 ? "" : "s"} earned `,
+    el("b", {}, usd(skip.data.compensation)),
+  );
+  const a = $<HTMLAnchorElement>("lastskip-tx");
+  a.href = `${explorer}/tx/${skip.tx}`;
+  a.textContent = `${skip.tx.slice(0, 10)}… on basescan · ${ago(skip.time)}`;
+  const list = $("lastskip-payouts");
+  const fresh = skip.tx !== lastSkipTx && lastSkipTx !== "";
+  list.className = `payouts${fresh ? " fresh" : ""}`;
+  list.replaceChildren(
+    ...passed.map((p, i) =>
+      el(
+        "li",
+        fresh ? { style: `animation-delay:${i * 140}ms` } : {},
+        chip(p.owner ?? ""),
+        el("span", { class: "mono" }, short(p.owner)),
+        el("span", { class: "ok" }, inWallet.has((p.owner ?? "").toLowerCase()) ? "in wallet" : "sending"),
+        el("span", { class: "amt" }, `+${usd(p.amount)}`),
+      ),
+    ),
+  );
+  lastSkipTx = skip.tx;
+}
+
 function render(f: FeedResponse) {
   DEMO = new Set((f.demoAgents ?? []).map((a) => a.toLowerCase()));
   explorer = f.explorer;
@@ -164,15 +230,16 @@ function render(f: FeedResponse) {
   const link = $<HTMLAnchorElement>("contract-link");
   link.textContent = `${short(f.contract)} · queue ${f.queueId}`;
   link.href = `${f.explorer}/address/${f.contract}`;
-  $("paid-total").textContent = usd(f.totals.paidToWaiting);
+  ticker(BigInt(f.totals.paidToWaiting));
   $("s-length").textContent = String(f.queue.length);
   $("s-skips").textContent = String(f.totals.skips);
   $("s-passes").textContent = String(f.totals.passes);
   $("s-served").textContent = String(f.totals.served);
-  $("s-claimed").textContent = usd(f.totals.claimed);
+  $("s-claimed").textContent = usd(BigInt(f.totals.claimed) + BigInt(f.totals.paidOut ?? 0));
   $("s-fees").textContent = usd(f.totals.fees);
   $("source").textContent = `data: ${API || location.origin}/feed · contract ${f.contract}`;
   renderQueue(f);
+  renderLastSkip(f);
   renderFeed(f);
   renderEarners(f);
 }

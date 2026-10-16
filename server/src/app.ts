@@ -496,6 +496,7 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
         queueId: cfg.queueId,
         explorer: cfg.explorer,
         demoAgents: [...cfg.demoAgents],
+        serviceIntervalMs: cfg.serviceIntervalMs,
         totals: feed.totals,
         queue: checkout.queueJson(snap),
         events: feed.recent(limit),

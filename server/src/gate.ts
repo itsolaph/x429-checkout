@@ -465,6 +465,8 @@ export class Gate {
       this.lastServeAt = servedAt;
       for (const ev of parseEventLogs({ abi: checkoutAbi, logs: receipt.logs, eventName: "Served" })) {
         const a = ev.args;
+        // a paid #1 already answered in its own request keeps that answer (one request per ticket)
+        if (this.admissions.get(a.ticketId)?.result !== undefined) continue;
         this.admissions.set(a.ticketId, {
           ticketId: a.ticketId,
           owner: a.owner,
