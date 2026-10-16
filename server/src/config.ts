@@ -34,6 +34,8 @@ export type Config = {
   /** Push compensation to passed owners automatically (operator payoutBatch). */
   autoPayout: boolean;
   payoutIntervalMs: number;
+  /** Addresses of the operator's own demo agents, labeled as such in /queue, /feed and the dashboard. */
+  demoAgents: Set<string>;
   /** Relayed joins per minute per client IP (each costs the operator gas). */
   joinsPerMinute: number;
   pollMs: number;
@@ -96,6 +98,12 @@ export function loadConfig(): Config {
     dataDir: process.env.X429_DATA_DIR || undefined,
     autoPayout: env("X429_AUTO_PAYOUT", "1") !== "0",
     payoutIntervalMs: int("X429_PAYOUT_INTERVAL_MS", 3_000),
+    demoAgents: new Set(
+      env("X429_DEMO_AGENTS", "")
+        .split(",")
+        .map((a) => a.trim().toLowerCase())
+        .filter((a) => a !== ""),
+    ),
     joinsPerMinute: int("X429_JOINS_PER_MINUTE", 30),
     pollMs: int("X429_POLL_MS", 1_000),
     deployBlock: BigInt(env("X429_DEPLOY_BLOCK", "0")),

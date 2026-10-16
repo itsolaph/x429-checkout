@@ -97,6 +97,9 @@ start_stack() {
   ' "${AGENT_KEYS[@]}"
   umask 022
   DEPLOYER="$(addr "$DEPLOYER_KEY")"
+  # the 6 rivals are the operator's demo agents, labeled as such by the server and the dashboard
+  DEMO_AGENTS=""
+  for i in 0 1 2 3 4 5; do DEMO_AGENTS="$DEMO_AGENTS${DEMO_AGENTS:+,}$(addr "${AGENT_KEYS[$i]}")"; done
   OPERATOR="$(addr "$OPERATOR_KEY")"
   # agents start with no ETH and no code (mainnet state of well-known test addresses is not ours)
   for k in "${AGENT_KEYS[@]}"; do
@@ -148,6 +151,7 @@ start_stack() {
   X429_OPERATOR_KEY_FILE="$WORK/operator.key" X429_PORT="$port" X429_PUBLIC_URL="$API" \
   X429_SERVICE_INTERVAL_MS="$SERVICE_INTERVAL_MS" X429_MIN_QUEUE_MS="$MIN_QUEUE_MS" X429_POLL_MS=500 \
   X429_DEPLOY_BLOCK="$DEPLOY_BLOCK" X429_SITE_DIR="$ROOT/site" X429_DATA_DIR="$WORK/data" X429_PAYOUT_INTERVAL_MS=1000 X429_AUTO_PAYOUT="${AUTO_PAYOUT:-1}" \
+  X429_DEMO_AGENTS="$DEMO_AGENTS" \
     node server/src/main.ts >"$WORK/server.log" 2>&1 &
   PIDS+=("$!")
   for _ in $(seq 1 80); do

@@ -411,6 +411,7 @@ export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDe
         contract: cfg.contract,
         queueId: cfg.queueId,
         explorer: cfg.explorer,
+        demoAgents: [...cfg.demoAgents],
         totals: feed.totals,
         queue: checkout.queueJson(snap),
         events: feed.recent(limit),

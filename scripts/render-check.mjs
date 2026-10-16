@@ -30,6 +30,7 @@ const checks = [
   ["ledger rows", document.querySelectorAll("#feed li").length === Math.min(120, feed.events.length)],
   ["line rows", document.querySelectorAll("#queue li").length === feed.queue.tickets.length],
   ["earners rows", document.querySelectorAll("#earners tr").length === Object.keys(feed.totals.earnedBy).length],
+  ["demo agents labeled", (feed.demoAgents ?? []).length === 0 || [...document.querySelectorAll("#queue li, #earners tr")].some((n) => n.textContent.includes("(demo agent)"))],
   ["explorer links", [...document.querySelectorAll("#feed a")].every((a) => a.getAttribute("href").startsWith(`${feed.explorer}/tx/0x`))],
 ];
 const failed = checks.filter(([, ok]) => !ok);

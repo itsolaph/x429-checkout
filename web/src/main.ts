@@ -8,6 +8,8 @@ type FeedResponse = {
   contract: string;
   queueId: number;
   explorer: string;
+  /** The operator's own demo agents (lowercase addresses), labeled in every panel. */
+  demoAgents?: string[];
   totals: { paidToWaiting: string; fees: string; claimed: string; skips: number; passes: number; served: number; joins: number; earnedBy: Record<string, string> };
   queue: { length: number; feeBps: number; tickets: Ticket[] };
   events: FeedEvent[];
@@ -25,8 +27,11 @@ function usd(units: string | bigint | number | undefined, digits = 6): string {
   return `$${n.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "")}`;
 }
 
+let DEMO = new Set<string>();
+
 function short(addr = ""): string {
-  return addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
+  if (!addr) return "";
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}${DEMO.has(addr.toLowerCase()) ? " (demo agent)" : ""}`;
 }
 
 /** A stable color per address, so the same agent is easy to follow across panels. */
@@ -111,6 +116,8 @@ function describe(e: FeedEvent): (Node | string)[] {
       return [who(e.owner), ` served after ${e.data.waited}s`, Number(e.data.timesPassed) > 0 ? `, passed ${e.data.timesPassed}× for ${usd(e.data.earned)}` : ""];
     case "claimed":
       return [who(e.owner), " claimed ", amt(e.amount)];
+    case "paid_out":
+      return [who(e.owner), " received ", amt(e.amount), " automatically"];
     case "left":
       return [who(e.owner), " left the line"];
     case "refunded":
@@ -151,6 +158,7 @@ function renderEarners(f: FeedResponse) {
 }
 
 function render(f: FeedResponse) {
+  DEMO = new Set((f.demoAgents ?? []).map((a) => a.toLowerCase()));
   explorer = f.explorer;
   $("net-label").textContent = f.chainId === 8453 ? "Base mainnet" : `chain ${f.chainId}`;
   const link = $<HTMLAnchorElement>("contract-link");

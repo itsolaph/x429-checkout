@@ -142,6 +142,7 @@ const position = z.object({
   skipPrice: units.describe("USDC units this ticket is paid each time someone passes it"),
   costToReach: units.describe("what a newcomer pays now to reach this position (fee included)"),
   etaSeconds: z.number().int(),
+  demo: z.boolean().describe("true for the operator's own demo agents"),
 }).strict();
 
 const ticketView = z.object({
@@ -244,6 +245,7 @@ function createServer() {
           skipPrice: str(x.skipPrice),
           costToReach: costs.get(Number(x.position)) ?? "0",
           etaSeconds: Math.max(1, Math.ceil(((Number(x.position) - 1) * interval) / 1000)),
+          demo: x.demo === true,
         }));
         const you = mine
           ? {

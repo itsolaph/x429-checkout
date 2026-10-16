@@ -197,7 +197,10 @@ async function main() {
     eq(s.queue.length, 6, "6 waiting");
     eq(s.queue.joinFee, JOIN_FEE.toString(), "join fee");
     eq(s.queue.positions.length, 6, "positions");
-    for (const [i, p] of s.queue.positions.entries()) eq(p.skipPrice, RIVAL_PRICES[i]!.toString(), `posted price at #${i + 1}`);
+    for (const [i, p] of s.queue.positions.entries()) {
+      eq(p.skipPrice, RIVAL_PRICES[i]!.toString(), `posted price at #${i + 1}`);
+      eq(p.demo, true, `#${i + 1} is labeled as a demo agent`);
+    }
     const comp = RIVAL_PRICES.reduce((a, b) => a + b, 0n);
     eq(s.queue.positions[0].costToReach, (comp + feeOf(comp)).toString(), "cost to reach #1");
     say(`x429_status: ${st.content[0]!.text}`);

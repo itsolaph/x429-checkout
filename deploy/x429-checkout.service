@@ -1,0 +1,33 @@
+# systemd unit for the x429 server. Example paths: adjust /opt/x429-checkout (the checkout, after
+# `npm ci` and `npm run build:web`) and /etc/x429 (env file and operator key, chmod 600, owned by x429).
+#
+#   sudo cp deploy/x429-checkout.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now x429-checkout
+#   journalctl -u x429-checkout -f
+#
+# Put a TLS reverse proxy (e.g. Caddy or nginx) in front: X429_HOST=127.0.0.1, X429_PUBLIC_URL=https://<your host>.
+[Unit]
+Description=x429 Checkout server (paid priority queue, x402 on Base)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=x429
+Group=x429
+WorkingDirectory=/opt/x429-checkout
+ExecStart=/usr/bin/env bash /opt/x429-checkout/scripts/start-server.sh /etc/x429/server.env
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+# hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/x429
+StateDirectory=x429
+
+[Install]
+WantedBy=multi-user.target

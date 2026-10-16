@@ -200,6 +200,7 @@ export class Checkout {
         timesPassed: t.timesPassed,
         earned: t.earned,
         paid: t.paid,
+        demo: this.cfg.demoAgents.has(t.owner.toLowerCase()),
       })),
     };
   }
