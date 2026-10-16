@@ -1,5 +1,9 @@
 # x429 Checkout with PayBox: the agent flow
 
+> **Legacy (v0.2).** This describes the remote MCP flow with EIP-712 joins/claims and an EIP-191 redeem,
+> which PayBox plugins cannot use. The PayBox plugin (`plugin/`, x402 only) is described in
+> [SUBMISSION.md](SUBMISSION.md) and SPEC §0.
+
 This is the exact sequence an agent follows when it hits a busy x429 API and its user has a PayBox
 wallet. The agent never sees a key. Every money step pauses for the user's passkey in PayBox.
 

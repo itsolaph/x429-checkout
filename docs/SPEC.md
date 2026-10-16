@@ -1,4 +1,61 @@
-# x429 v0.2: paid priority over x402, on Base
+# x429 v0.3: paid priority over x402, on Base (PayBox plugin edition)
+
+## 0. v0.3: x402 is the only user action
+
+v0.3 keeps everything below (v0.2) and adds a user side that needs nothing but x402 payments, so it
+runs through a PayBox plugin (which can return data or one x402 proposal, never ask for a
+signature). Sections 3, 5 and 6 below describe the v0.2 paths, which still work.
+
+**Identity.** The payer of an x402 `exact` payment is `authorization.from` of its EIP-3009
+`TransferWithAuthorization`. The contract creates and moves tickets for that address.
+
+**Join** = `POST /join`, body `{skipPrice?}` (USDC units, at most `X429_MAX_SKIP_PRICE`, default
+0.1 USDC). Without a payment header: 402 with `amount` = the queue's `joinFee` (`maxAmountRequired`
+in v1, at least 1 unit). With one: the operator calls `joinPaid(queueId, skipPrice, auth)`, which
+pulls the authorization, creates a waiting ticket for `auth.from` at the tail, books `joinFee` as
+operator fees and refunds the rest in the same transaction. Errors: `already_waiting` (409),
+`queue_full` (409), `join_fee_not_covered` (402), plus every x402 verification error of §4.3. The
+join fee goes to the operator: it pays the operator's gas for the join and makes queue spam cost
+money, without new accounting (a refundable bond would lock the user's money and need a second
+transaction to return it).
+
+**Skip** = `POST /skip`, body `{target, owner?, skipPrice?}` (or the v0.2 query form). As §4, priced
+for `owner` when given (the public payer address; never the token). The 402 `resource` is the plain
+path for body requests.
+
+**Redeem token.** Every successful paid response (join, skip) contains `token`: `x429_` followed
+by 32 random bytes in base64url (43 characters). The server stores only its SHA-256, with the
+ticket id and owner (`X429_DATA_DIR`, survives restarts). The token is a bearer credential for that
+ticket; a paid response may be retried: the same payment (same `from` and nonce, signature valid,
+inside its `validBefore`) answers 200 `replayed: true` with a fresh token for the same ticket, and
+nothing is charged again.
+
+**Use** = `POST /use {token, city?}`: 429 `{status: "waiting", position, etaSeconds, skipToFront}`
+(with `Retry-After`) while waiting, 200 `{status: "served", result}` once served. The result is
+built once; using the token again inside the admission window (`X429_ADMISSION_TTL_MS`, default
+5 min) returns the same result. Afterwards 410 `expired`. `POST /ticket {token}` shows the status
+without using it. One served ticket is still one request.
+
+**Payouts.** After each skip the server queues the passed owners and the operator calls
+`payoutBatch(owners)` (at most 64): for each owner it sends `claimable[owner]` to that owner and
+zeroes it. The function has no recipient parameter, so the operator decides only *when*, never
+*where*. A transfer USDC refuses (blocklist) leaves the balance claimable and emits `PayoutFailed`.
+A periodic sweep re-queues anyone with a claimable balance. `claim` / `claimWithSig` stay as the
+fallback.
+
+**Reads for the plugin.** `GET|POST /quote` (`{target?, owner?, token?}` → cost, `maxAmountRequired`
+ceiling, `quoteExpiresAt`), `GET /queue` (positions, posted prices, cost to reach each, `joinFee`,
+`serviceIntervalMs`), `GET /earnings/{address}` (earned, received, pending).
+
+**Contract additions.** `joinFee(queueId)`, `setJoinFee(queueId, fee)` (operator, max 1 USDC),
+`joinPaid`, `payout(owner)`, `payoutBatch(owners)`; events `JoinFeeSet`, `JoinPaid`, `PaidOut`,
+`PayoutFailed`; refund reasons `AlreadyWaiting`, `BelowJoinFee` for front-run join payments, which
+are applied or refunded in full exactly like front-run skips (§4.5). Descriptor `version` is "0.3"
+and gains `use`, `payouts` and `gaslessJoin` (the v0.2 join, now `POST /join/signed`).
+
+---
+
+# v0.2 (unchanged, still supported)
 
 x429 turns `429 Too Many Requests` into a price. A saturated API answers 429 with a descriptor of
 an onchain queue. A client may wait for free, or pay to move ahead. Moving ahead costs the posted
