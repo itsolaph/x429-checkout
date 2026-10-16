@@ -1,9 +1,10 @@
-// End-to-end scenario against a running server on a Base fork. Run by scripts/e2e-local.sh.
+// End-to-end scenario against a running server on a Base fork (2 s blocks). Run by scripts/e2e-local.sh.
 //
 // x402 is the only user action. 6 demo rivals join with a paid `POST /join` → a new agent drives the
 // PayBox plugin (plugin/dist/plugin.mjs over stdio, a fresh process per call): status → quote → join
 // proposal → (PayBox simulator pays) → skip proposal → (pays) → #1 → the rivals it passed are paid
-// automatically by the operator → the agent uses its redeem token and is served. Failure cases:
+// automatically by the operator; the paid skip response already holds the API result and a receipt.
+// Then the demo-agent service keeps >= 3 labeled demo tickets waiting. Failure cases:
 // retried payment, expired authorization (v1), expired quote (v2), price moved above the signed
 // ceiling, front-run and cancelled authorizations, double join. Every balance is asserted to the unit.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -15,6 +16,8 @@ import { fmtUsd } from "../server/src/protocol.ts";
 import { decodeHeader } from "../server/src/x402.ts";
 import { SimAgent } from "./agent.ts";
 import { PluginClient } from "./plugin-client.ts";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createInterface } from "node:readline";
 
 const URL_ = process.env.X429_URL ?? "http://127.0.0.1:8429";
 const RPC = process.env.X429_RPC_URL ?? "http://127.0.0.1:8545";
@@ -31,6 +34,23 @@ const PLUGIN_NODE = process.env.E2E_PLUGIN_NODE ?? "node";
 // what the plugin puts into proposals (PayBox pays HTTPS on 443 only); the simulator routes it here
 const PUBLIC_ORIGIN = "https://x429.example";
 const BUSY = "/v1/forecast?city=Lisbon";
+const SERVE_CONFIRM = process.env.E2E_SERVE_CONFIRM === "1";
+const BLOCK_TIME = process.env.E2E_BLOCK_TIME ?? "";
+const LATENCY_TARGET_MS = 5_000;
+
+type Latency = { label: string; clientMs: number; serverTotalMs: number; serverSettleMs: number | null; served: boolean };
+const latencies: Latency[] = [];
+/** Records the paid request's latency: client wall time and the server's Server-Timing breakdown. */
+function timing(label: string, headers: Headers, clientMs: number, served = false) {
+  const st = headers.get("server-timing") ?? "";
+  const dur = (name: string) => {
+    const m = new RegExp(`${name};dur=([0-9.]+)`).exec(st);
+    return m ? Number(m[1]) : null;
+  };
+  const l = { label, clientMs: Math.round(clientMs), serverTotalMs: dur("total") ?? -1, serverSettleMs: dur("settle"), served };
+  latencies.push(l);
+  return l;
+}
 
 const client = createPublicClient({ transport: http(RPC) });
 const results: { name: string; ok: boolean; detail?: string }[] = [];
@@ -150,7 +170,8 @@ async function main() {
 
   await step("6 demo rivals join with a paid x402 POST /join; each pays exactly the join fee, no ETH", async () => {
     for (const [i, r] of rivals.entries()) {
-      const { result: res, payload } = await r.join(RIVAL_PRICES[i]!, i % 2 === 0 ? 1 : 2);
+      const { result: res, payload, ms } = await r.join(RIVAL_PRICES[i]!, i % 2 === 0 ? 1 : 2);
+      timing(`paid join (${r.name})`, res.headers, ms);
       eq(res.status, 200, `${r.name} join status (${JSON.stringify(res.body)})`);
       recordJoin(r, res.body, RIVAL_PRICES[i]!, r.name);
       eq(res.body.position, i + 1, `${r.name} position`);
@@ -166,19 +187,34 @@ async function main() {
     eq(await authUsed(rivals[0]!.address, again.payload.authorization.nonce), false, "authorization unused");
   });
 
-  await step("new agent hits the busy API: 429 with an x429 descriptor and a price", async () => {
+  await step("new agent hits the busy API: the 429 itself carries the offer (position, price to #1, x429_skip, /skip)", async () => {
     const r = await skipper.callApi(BUSY);
     eq(r.status, 429, "busy API status");
-    check(Number(r.headers.get("retry-after")) >= 1, "Retry-After header");
-    const d = r.body.x429;
-    eq(d.version, "0.3", "descriptor version");
-    eq(d.chainId, CHAIN_ID, "chainId");
-    eq(d.position, 7, "you would be #7");
-    eq(d.skip.toFront.passes, 6, "skipping to the front passes 6 agents");
+    const b = r.body;
     const comp = RIVAL_PRICES.reduce((a, b) => a + b, 0n);
-    eq(BigInt(d.skip.toFront.cost), comp + feeOf(comp), "cost to the front");
-    eq(d.use.url, `${URL_}/use`, "descriptor points at /use");
-    say(`429 says: "${r.body.message}"`);
+    const cost = comp + feeOf(comp);
+    eq(b.error, "too_many_requests", "error");
+    eq(b.position, 7, "you would be #7");
+    eq(b.queueLength, 6, "6 waiting");
+    eq(b.you, null, "no ticket yet");
+    eq(b.skip.targetPosition, 1, "the offer is for #1");
+    eq(b.skip.passes, 6, "passes 6 agents");
+    eq(BigInt(b.skip.cost), cost, "live cost to #1");
+    eq(BigInt(b.skip.maxAmount), cost + (cost * 2_000n) / 10_000n, "max amount (ceiling)");
+    eq(b.skip.url, `${URL_}/skip`, "/skip URL");
+    eq(b.skip.method, "POST", "method");
+    eq(JSON.stringify(b.skip.body), JSON.stringify({ target: 1 }), "body to send");
+    eq(b.skip.plugin.tool, "x429_skip", "the plugin hint");
+    check(/x429_skip/.test(b.next) && /answer/.test(b.next), "`next` says what to do");
+    check(Buffer.byteLength(JSON.stringify(b)) < 2_048, `small JSON (${Buffer.byteLength(JSON.stringify(b))} bytes)`);
+    check(Number(r.headers.get("retry-after")) >= 1, "Retry-After");
+    eq(r.headers.get("x-429-position"), "7", "X-429-Position");
+    eq(r.headers.get("x-429-skip-cost"), cost.toString(), "X-429-Skip-Cost");
+    eq(r.headers.get("x-429-skip-url"), `${URL_}/skip`, "X-429-Skip-Url");
+    check(r.headers.get("link")?.includes(`<${URL_}/skip>; rel="payment"`), "Link rel=payment");
+    const full = await skipper.http("GET", "/x429");
+    eq(full.body.version, "0.3", "the full descriptor stays at /x429");
+    say(`429 says: "${b.message}" next: ${b.next}`);
   });
 
   await step("plugin over stdio: 6 tools, strict schemas; x429_status shows the queue", async () => {
@@ -248,19 +284,25 @@ async function main() {
     eq(use.structuredContent.status, "waiting", "x429_use while waiting: position and ETA");
     eq(use.structuredContent.position, 7, "x429_use position");
     check(use.structuredContent.etaSeconds >= 1, "ETA");
+    const busy = await skipper.http("GET", BUSY, undefined, { "x-429-token": skipperToken });
+    eq(busy.status, 429, "the busy API with the token: still waiting");
+    eq(busy.body.you.position, 7, "429 shows your position when you joined");
+    eq(JSON.stringify(busy.body.skip.body), JSON.stringify({ target: 1, owner: skipper.address }), "priced from your ticket");
   });
 
   let skipHeaders: Record<string, string> = {};
   let skipBody: unknown;
-  await step("plugin x429_skip → proposal at the live ceiling → PayBox pays → #1; each rival credited its price", async () => {
-    const r = await plugin.call("x429_skip", { targetPosition: 1, token: skipperToken });
+  let skipResponse = "";
+  let paidResult: any;
+  await step("plugin x429_skip → one passkey payment → the paid response holds the answer and a receipt", async () => {
+    const r = await plugin.call("x429_skip", { targetPosition: 1, token: skipperToken, city: "Lisbon" });
     check(!r.isError, `skip error: ${r.content[0]?.text}`);
     const p = r.structuredContent["io.paybox/transactionProposal"];
     const comp = RIVAL_PRICES.reduce((a, b) => a + b, 0n);
     const cost = comp + feeOf(comp);
     const ceiling = cost + (cost * 2_000n) / 10_000n;
     eq(p.request.url, `${PUBLIC_ORIGIN}/skip`, "proposal url");
-    eq(JSON.stringify(p.request.body), JSON.stringify({ target: 1, owner: skipper.address }), "body: target and owner, never the token");
+    eq(JSON.stringify(p.request.body), JSON.stringify({ target: 1, owner: skipper.address, city: "Lisbon" }), "body: target, owner, city; never the token");
     eq(p.payment.maxAmount, ceiling.toString(), "maxAmount = live ceiling");
     check(Date.parse(p.expiresAt) <= Date.now() + 240_000 + 1_000, "expiry at most 4 minutes");
     const before = await usdcOf(skipper.address);
@@ -276,11 +318,38 @@ async function main() {
     eq(BigInt(paid.result.body.ticketId), skipperTicket, "same ticket");
     eq(BigInt(paid.result.body.refund), paid.amount - cost, "refund = authorized - cost");
     eq(await usdcOf(skipper.address), before - cost, "skipper paid exactly the cost");
-    eq((await queueOwners())[0]!.toLowerCase(), skipper.address.toLowerCase(), "head of the queue");
-    skipperToken = paid.result.body.token;
+    // the answer and the receipt are in the paid response: no polling, no second call
+    const b = paid.result.body;
+    eq(b.status, "served", "served inside the paid request");
+    eq(b.result.city, "Lisbon", "the API result");
+    check(typeof b.result.summary === "string" && b.result.summary.startsWith("Lisbon"), "a useful summary");
+    eq(BigInt(b.result.admitted.ticketId), skipperTicket, "admitted with the paying ticket");
+    const rc = b.receipt;
+    eq(rc.newPosition, 1, "receipt: new position");
+    eq(rc.fromPosition, 7, "receipt: from");
+    eq(rc.agentsPaid, 6, "receipt: agents paid");
+    for (const [i, x] of rc.passed.entries()) {
+      eq(BigInt(x.amount), RIVAL_PRICES[5 - i]!, `receipt: ticket passed #${i + 1} got its own price`);
+      check(x.demo === true && x.who.endsWith("(demo agent)") && /^0x[0-9a-fA-F]{4}…[0-9a-fA-F]{4}/.test(x.who), `receipt: short address + demo label (${x.who})`);
+      check(typeof x.amountUsd === "string" && x.amountUsd.startsWith("$"), "receipt: amount in USDC");
+    }
+    eq(BigInt(rc.paidToWaiting), comp, "receipt: total paid to people waiting");
+    eq(BigInt(rc.operatorFee), feeOf(comp), "receipt: operator fee");
+    eq(BigInt(rc.refund), paid.amount - cost, "receipt: refund of the unused buffer");
+    eq(rc.settlement.txHash, b.txHash, "receipt: settlement tx");
+    eq(rc.settlement.explorerUrl, `https://basescan.org/tx/${b.txHash}`, "receipt: basescan URL");
+    eq(rc.waitSavedSeconds, 6 * 4, "receipt: wait saved (6 places x 4 s service interval)");
+    eq(rc.served.status, "served", "receipt: served");
+    check(/^Skipped ~24s; 6 agents earned \$0\.03\.$/.test(rc.headline), `headline: ${rc.headline}`);
+    const l = timing("skip to #1, served in the request", paid.result.headers, paid.ms, true);
+    say(`latency (block time ${BLOCK_TIME || "auto"} s, serve ${SERVE_CONFIRM ? "confirmed" : "confirmed async"}): client ${l.clientMs} ms, server ${l.serverTotalMs} ms (settle ${l.serverSettleMs} ms)`);
+    if (!SERVE_CONFIRM) check(l.clientMs < LATENCY_TARGET_MS, `paid skip answered in ${l.clientMs} ms, target < ${LATENCY_TARGET_MS} ms`);
+    skipperToken = b.token;
     skipHeaders = paid.headers;
     skipBody = p.request.body;
-    say(`skipper paid ${fmtUsd(cost)} (refund ${fmtUsd(BigInt(paid.result.body.refund))}) tx ${paid.result.body.txHash}`);
+    skipResponse = JSON.stringify(b);
+    paidResult = b.result;
+    say(`receipt: ${rc.headline} tx ${b.txHash}; answer: ${b.result.summary}`);
   });
 
   await step("rivals are paid automatically by the operator: balances to the unit, no claim, no ETH", async () => {
@@ -302,13 +371,14 @@ async function main() {
     say(`x429_earnings: ${e.content[0]!.text}`);
   });
 
-  await step("a retried paid request (same payment) gets a fresh token for the same ticket, nothing charged", async () => {
+  await step("a retried paid request (same EIP-3009 nonce) returns the identical response, nothing charged", async () => {
     const before = await usdcOf(skipper.address);
-    const r = await skipper.http("POST", "/skip", skipBody, skipHeaders);
-    eq(r.status, 200, `retry status (${JSON.stringify(r.body)})`);
-    eq(r.body.replayed, true, "replayed");
-    eq(BigInt(r.body.ticketId), skipperTicket, "same ticket");
-    check(r.body.token !== skipperToken && r.body.token.startsWith("x429_"), "fresh token");
+    const [a, b] = await Promise.all([skipper.http("POST", "/skip", skipBody, skipHeaders), skipper.http("POST", "/skip", skipBody, skipHeaders)]);
+    for (const r of [a, b]) {
+      eq(r.status, 200, `retry status (${JSON.stringify(r.body)})`);
+      eq(JSON.stringify(r.body), skipResponse, "same response, byte for byte (result, receipt and token)");
+      eq(r.headers.get("x-429-idempotent-replay"), "true", "marked as a replay");
+    }
     eq(await usdcOf(skipper.address), before, "no money moved");
   });
 
@@ -344,7 +414,8 @@ async function main() {
 
   await step("a fresh v2 payment with a JSON body (join + skip in one payment) settles", async () => {
     const before = await usdcOf(late.address);
-    const { result: r } = await late.pay("/skip", { body: { target: 2, skipPrice: "2500" }, version: 2 });
+    const { result: r, ms } = await late.pay("/skip", { body: { target: 2, skipPrice: "2500" }, version: 2 });
+    timing("join + skip to #2 (v2)", r.headers, ms);
     eq(r.status, 200, `v2 status (${JSON.stringify(r.body)})`);
     const settle = decodeHeader(r.headers.get("payment-response")!) as any;
     eq(settle.success, true, "PAYMENT-RESPONSE success");
@@ -354,15 +425,15 @@ async function main() {
   });
 
   await step("price moved above the signed ceiling: clear 402, nothing charged; a fresh quote then settles", async () => {
-    // the cautious agent prices #2, then a rusher with a high skip price jumps to #2 first
-    const pr = await pAgent.paymentRequired("/skip?queue=1&target=2");
+    // the cautious agent prices #1, then a rusher with a high skip price jumps to #2 (ahead of it) first
+    const pr = await pAgent.paymentRequired("/skip?queue=1&target=1");
     const payload = await pAgent.signExact({ asset: pr.v1.asset, payTo: pr.v1.payTo, amount: BigInt(pr.v1.maxAmountRequired), maxTimeoutSeconds: pr.v1.maxTimeoutSeconds });
     const rush = await qAgent.pay("/skip?queue=1&target=2&skipPrice=50000");
     eq(rush.result.status, 200, `rusher skip (${JSON.stringify(rush.result.body)})`);
     recordSkip(rush.result.body, "rusher");
 
     const before = await usdcOf(pAgent.address);
-    const r = await pAgent.http("POST", "/skip?queue=1&target=2", undefined, pAgent.v1Header(payload));
+    const r = await pAgent.http("POST", "/skip?queue=1&target=1", undefined, pAgent.v1Header(payload));
     eq(r.status, 402, "status");
     eq(r.body.error, "price_moved", "reason");
     check(BigInt(r.body.cost) > BigInt(pr.v1.maxAmountRequired), "the new cost is above the signed ceiling");
@@ -371,9 +442,10 @@ async function main() {
     eq(await usdcOf(pAgent.address), before, "nothing charged");
     eq(await authUsed(pAgent.address, payload.authorization.nonce), false, "authorization still unused");
 
-    const retry = await pAgent.pay("/skip?queue=1&target=2");
+    const retry = await pAgent.pay("/skip?queue=1&target=1");
     eq(retry.result.status, 200, `retry with the fresh quote (${JSON.stringify(retry.result.body)})`);
     recordSkip(retry.result.body, "cautious retry");
+    timing(`skip to #1 (${retry.result.body.status})`, retry.result.headers, retry.ms, retry.result.body.status === "served");
     eq(await usdcOf(pAgent.address), before - BigInt(retry.result.body.cost), "charged exactly the new cost");
   });
 
@@ -431,24 +503,17 @@ async function main() {
     eq(await usdcOf(CONTRACT), held, "contract untouched");
   });
 
-  await step("the skipper is served next: plugin x429_use returns the API result, again on retry", async () => {
-    const deadline = Date.now() + 90_000;
-    let last: any;
-    while (Date.now() < deadline) {
-      last = await plugin.call("x429_use", { token: skipperToken, city: "Lisbon" });
-      check(!last.isError, `x429_use error: ${last.content[0]?.text}`);
-      if (last.structuredContent.status === "served") break;
-      check(["waiting", "serving"].includes(last.structuredContent.status), `unexpected ${JSON.stringify(last.structuredContent)}`);
-      await sleep(Math.min(2_000, (last.structuredContent.etaSeconds ?? 1) * 1000));
+  await step("the serve was confirmed onchain; x429_use with the token returns the same answer (one request per ticket)", async () => {
+    let served = await client.getContractEvents({ address: CONTRACT, abi: checkoutAbi, eventName: "Served", fromBlock: DEPLOY_BLOCK });
+    for (let i = 0; i < 40 && served.length === 0; i++) {
+      await sleep(250);
+      served = await client.getContractEvents({ address: CONTRACT, abi: checkoutAbi, eventName: "Served", fromBlock: DEPLOY_BLOCK });
     }
+    eq(served[0]?.args.ticketId, skipperTicket, "first ticket ever served is the skipper's (no admission round for a paid #1)");
+    const last = await plugin.call("x429_use", { token: skipperToken, city: "Lisbon" });
     eq(last.structuredContent.status, "served", "served");
     const result = last.structuredContent.result;
-    eq(result.city, "Lisbon", "forecast city");
-    check(typeof result.summary === "string" && result.summary.startsWith("Lisbon"), "a useful summary");
-    eq(result.admitted.via, "queue", "admitted through the queue");
-    eq(BigInt(result.admitted.ticketId), skipperTicket, "ticket");
-    const served = await client.getContractEvents({ address: CONTRACT, abi: checkoutAbi, eventName: "Served", fromBlock: DEPLOY_BLOCK });
-    eq(served[0]?.args.ticketId, skipperTicket, "first ticket ever served is the skipper's");
+    eq(JSON.stringify(result), JSON.stringify(paidResult), "x429_use returns the answer the paid response carried");
     const again = await plugin.call("x429_use", { token: skipperToken, city: "Paris" });
     eq(again.structuredContent.status, "served", "a retry inside the admission window");
     eq(JSON.stringify(again.structuredContent.result), JSON.stringify(result), "returns the same result (one request per ticket)");
@@ -458,15 +523,21 @@ async function main() {
   });
 
   await step("an agent already in line pays to move up 3 places (skip without join)", async () => {
-    const r1 = rivals[0]!;
-    const q = await r1.http("GET", `/queue?owner=${r1.address}`);
-    const ticket = q.body.you.ticket;
-    check(ticket && ticket.position >= 4, `rival-1 still waits at #4 or later (${JSON.stringify(ticket)})`);
+    // the line drains in real time (2 s blocks), so take the rival furthest back, at #4 or later
+    const rows = (await skipper.http("GET", "/queue")).body.queue.tickets as any[];
+    const waiting = rivals
+      .map((r) => ({ r, row: rows.find((t) => t.owner.toLowerCase() === r.address.toLowerCase()) }))
+      .filter((x) => x.row && x.row.position >= 4)
+      .sort((a, b) => b.row.position - a.row.position);
+    check(waiting.length > 0, `a rival still waits at #4 or later (${rows.length} in line)`);
+    const r1 = waiting[0]!.r;
+    const ticket = { id: waiting[0]!.row.ticketId, position: Number(waiting[0]!.row.position) };
     const target = ticket.position - 3;
     const before = await usdcOf(r1.address);
     const paid = await r1.pay("/skip", { body: { target, owner: r1.address } });
-    eq(paid.result.status, 200, `rival-1 skip (${JSON.stringify(paid.result.body)})`);
-    recordSkip(paid.result.body, "rival-1 move up");
+    eq(paid.result.status, 200, `${r1.name} skip (${JSON.stringify(paid.result.body)})`);
+    recordSkip(paid.result.body, `${r1.name} move up`);
+    timing("skip up 3 places", paid.result.headers, paid.ms);
     eq(paid.result.body.ticketSkipPrice, null, "no new ticket");
     eq(paid.result.body.passes, 3, "passed 3");
     eq(paid.result.body.position, target, "new position");
@@ -506,12 +577,66 @@ async function main() {
     say(`plugin calls (fresh process each): ${plugin.calls}`);
   });
 
+  await step("demo-agent service keeps >= 3 labeled demo tickets waiting; served ones rejoin", async () => {
+    // a fresh line: everything else gets served (a real agent is waiting, so the demo hold is off)
+    const demoKeys = keys.demo as Hex[];
+    const demoAddrs = demoKeys.map((k) => privateKeyToAccount(k).address.toLowerCase());
+    const keysFile = `${process.env.E2E_KEYS}.demo.json`;
+    writeFileSync(keysFile, JSON.stringify(demoKeys), { mode: 0o600 });
+    const child: ChildProcess = spawn(process.execPath, ["agent-sim/demo-agents.ts"], {
+      env: { ...process.env, X429_URL: URL_, X429_RPC_URL: RPC, X429_CHAIN_ID: String(CHAIN_ID), X429_USDC: USDC, DEMO_KEYS_FILE: keysFile, DEMO_PRICES: "2000,3000,4000,6000", DEMO_REJOIN_DELAY_MS: "0", DEMO_POLL_MS: "500", DEMO_MAX_JOINS_PER_HOUR: "40", DEMO_MAX_USDC_PER_DAY: "0.04", DEMO_MIN_USDC: "0.005" },
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    const events: any[] = [];
+    createInterface({ input: child.stdout! }).on("line", (line) => {
+      try {
+        events.push(JSON.parse(line));
+      } catch {
+        // not ours
+      }
+    });
+    try {
+      const demoWaiting = async () => {
+        const q = await skipper.http("GET", "/queue");
+        return q.body.queue.tickets.filter((t: any) => demoAddrs.includes(t.owner.toLowerCase()) && t.demo === true).length;
+      };
+      const deadline = Date.now() + 60_000;
+      while ((await demoWaiting()) < 4 && Date.now() < deadline) await sleep(500);
+      eq(await demoWaiting(), 4, "all 4 demo agents wait in line");
+      check(events.some((e) => e.evt === "start") && events.filter((e) => e.evt === "joined").length >= 4, "the service logs its joins");
+      // a real agent joins behind them, so the line is served; the demo agents rejoin after their turn
+      const j = await skipper.join(1_000n, 2); // served earlier, so free to wait again as a real agent
+      eq(j.result.status, 200, `real agent joins (${JSON.stringify(j.result.body)})`);
+      let minDemo = 99;
+      let maxQueue = 0;
+      const until = Date.now() + 90_000;
+      while (Date.now() < until && events.filter((e) => e.evt === "joined").length < 6) {
+        const q = await skipper.http("GET", "/queue");
+        const d = q.body.queue.tickets.filter((t: any) => demoAddrs.includes(t.owner.toLowerCase())).length;
+        minDemo = Math.min(minDemo, d);
+        maxQueue = Math.max(maxQueue, q.body.queue.length);
+        await sleep(400);
+      }
+      const joins = events.filter((e) => e.evt === "joined");
+      check(joins.length >= 6, `served demo agents rejoined (${joins.length} joins)`);
+      check(minDemo >= 3, `>= 3 demo tickets waiting at every sample (min ${minDemo})`);
+      const st = await plugin.call("x429_status", {});
+      check(st.structuredContent.queue.positions.filter((x: any) => x.demo).length >= 3, "x429_status shows >= 3 demo tickets");
+      say(`demo agents: ${joins.length} joins, at least ${minDemo} demo tickets waiting at every sample, line up to ${maxQueue}`);
+    } finally {
+      child.kill("SIGTERM");
+      await new Promise((r) => child.once("exit", r));
+    }
+    check(events.some((e) => e.evt === "exit"), "the service stops cleanly on SIGTERM");
+  });
+
   const stats = await skipper.http("GET", "/stats");
   const summary = {
     results,
     paidToWaiting: paidToWaiting.toString(),
     fees: feesTotal.toString(),
     pluginCalls: plugin.calls,
+    latency: { blockTimeSeconds: BLOCK_TIME || "auto", serveConfirm: SERVE_CONFIRM, samples: latencies },
     gas: stats.body.gas,
     gate: stats.body.gate,
     payouts: stats.body.payouts,

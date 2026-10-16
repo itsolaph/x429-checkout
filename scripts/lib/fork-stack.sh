@@ -7,7 +7,9 @@
 # Nothing is sent to a public network: the public RPC is only read by anvil to build the fork.
 #
 # Caller sets: WORK (work dir), TAG (log prefix), FEE_BPS, SERVICE_INTERVAL_MS, MIN_QUEUE_MS, JOIN_FEE (units),
-# AUTO_PAYOUT (1 = operator pushes compensation, default; 0 = owners claim).
+# AUTO_PAYOUT (1 = operator pushes compensation, default; 0 = owners claim), ANVIL_BLOCK_TIME (seconds;
+# empty = mine on every transaction), SERVE_CONFIRM (1 = a paid skip waits for its serve receipt).
+# Keys 111..114 are the demo-agent service's wallets (0.05 USDC each).
 # Env: E2E_RPC_URL (fork source), E2E_FORK_BLOCK (pinned block, default 52621900), E2E_KEEP=1.
 # Exports: RPC, API, CONTRACT, QUEUE_ID, DEPLOY_BLOCK, USDC, AGENT_KEYS[], WATCHER_KEY, PIDS[].
 
@@ -89,17 +91,17 @@ start_stack() {
   WATCHER_KEY="$(derive 2)"
   printf '%s\n' "$OPERATOR_KEY" >"$WORK/operator.key"
   AGENT_KEYS=()
-  for i in $(seq 100 110); do AGENT_KEYS+=("$(derive "$i")"); done
+  for i in $(seq 100 114); do AGENT_KEYS+=("$(derive "$i")"); done
   WATCHER_KEY="$WATCHER_KEY" OUT="$WORK/keys.json" node -e '
     const k = process.argv.slice(1);
-    const out = { rivals: k.slice(0, 6), skipper: k[6], late: k[7], cautious: k[8], rusher: k[9], victim: k[10], watcher: process.env.WATCHER_KEY };
+    const out = { rivals: k.slice(0, 6), skipper: k[6], late: k[7], cautious: k[8], rusher: k[9], victim: k[10], demo: k.slice(11, 15), watcher: process.env.WATCHER_KEY };
     require("fs").writeFileSync(process.env.OUT, JSON.stringify(out));
   ' "${AGENT_KEYS[@]}"
   umask 022
   DEPLOYER="$(addr "$DEPLOYER_KEY")"
   # the 6 rivals are the operator's demo agents, labeled as such by the server and the dashboard
   DEMO_AGENTS=""
-  for i in 0 1 2 3 4 5; do DEMO_AGENTS="$DEMO_AGENTS${DEMO_AGENTS:+,}$(addr "${AGENT_KEYS[$i]}")"; done
+  for i in 0 1 2 3 4 5 11 12 13 14; do DEMO_AGENTS="$DEMO_AGENTS${DEMO_AGENTS:+,}$(addr "${AGENT_KEYS[$i]}")"; done
   OPERATOR="$(addr "$OPERATOR_KEY")"
   # agents start with no ETH and no code (mainnet state of well-known test addresses is not ours)
   for k in "${AGENT_KEYS[@]}"; do
@@ -140,9 +142,19 @@ start_stack() {
     cast send --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" "$USDC" 'mint(address,uint256)' "$(addr "${AGENT_KEYS[$i]}")" 100000 >/dev/null
   done
   cast send --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" "$USDC" 'mint(address,uint256)' "$(addr "${AGENT_KEYS[0]}")" 1000000 >/dev/null
+  for i in 11 12 13 14; do
+    cast send --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" "$USDC" 'mint(address,uint256)' "$(addr "${AGENT_KEYS[$i]}")" 50000 >/dev/null
+  done
   log "minted forked USDC through a minter set by USDC's masterMinter ($master): 5 USDC to each of 5 paying agents, 0.1 USDC to each demo rival (+1 USDC to rival-1)"
 
-  # 6. dashboard + server
+  # 6. from here on, Base-like block times (setup ran with automine, which is faster)
+  if [ -n "${ANVIL_BLOCK_TIME:-}" ]; then
+    cast rpc --rpc-url "$RPC" evm_setAutomine false >/dev/null
+    cast rpc --rpc-url "$RPC" evm_setIntervalMining "$ANVIL_BLOCK_TIME" >/dev/null
+    log "anvil now mines a block every ${ANVIL_BLOCK_TIME} s"
+  fi
+
+  # 7. dashboard + server
   node web/build.mjs >"$WORK/web.log" 2>&1 || { cat "$WORK/web.log"; die "dashboard build failed"; }
   local port
   port="$(free_port)"
@@ -151,6 +163,7 @@ start_stack() {
   X429_OPERATOR_KEY_FILE="$WORK/operator.key" X429_PORT="$port" X429_PUBLIC_URL="$API" \
   X429_SERVICE_INTERVAL_MS="$SERVICE_INTERVAL_MS" X429_MIN_QUEUE_MS="$MIN_QUEUE_MS" X429_POLL_MS=500 \
   X429_DEPLOY_BLOCK="$DEPLOY_BLOCK" X429_SITE_DIR="$ROOT/site" X429_DATA_DIR="$WORK/data" X429_PAYOUT_INTERVAL_MS=1000 X429_AUTO_PAYOUT="${AUTO_PAYOUT:-1}" \
+  X429_SERVE_CONFIRM="${SERVE_CONFIRM:-0}" X429_FORECAST_SOURCE=demo \
   X429_DEMO_AGENTS="$DEMO_AGENTS" \
     node server/src/main.ts >"$WORK/server.log" 2>&1 &
   PIDS+=("$!")

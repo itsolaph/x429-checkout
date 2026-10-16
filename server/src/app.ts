@@ -3,11 +3,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
-import { createHash } from "node:crypto";
 import type { Address } from "viem";
 import { CheckoutError, parseAddress, parseUint, type Checkout, type Log, type SkipResult } from "./checkout.ts";
 import type { Feed } from "./feed.ts";
-import type { Gate } from "./gate.ts";
+import type { Admission, Gate, ServeNow } from "./gate.ts";
+import { demoForecast, type ForecastService } from "./forecast.ts";
 import { toJson } from "./json.ts";
 import { handleMcp, pluginManifest } from "./mcp.ts";
 import type { Payouts } from "./payouts.ts";
@@ -36,8 +36,8 @@ const MIME: Record<string, string> = {
 
 const CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-headers": "content-type, x-payment, payment-signature, x-429-ticket, x-429-signature, mcp-protocol-version",
-  "access-control-expose-headers": "payment-required, payment-response, x-payment-response, retry-after, x-429-queue",
+  "access-control-allow-headers": "content-type, x-payment, payment-signature, x-429-token, x-429-ticket, x-429-signature, mcp-protocol-version",
+  "access-control-expose-headers": "payment-required, payment-response, x-payment-response, retry-after, link, server-timing, x-429-queue, x-429-position, x-429-skip-cost, x-429-skip-url, x-429-idempotent-replay",
 };
 
 /** The caller's address for rate limits. Behind a proxy, set the proxy to overwrite X-Forwarded-For. */
@@ -68,41 +68,11 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   }
 }
 
-function cityOf(raw: unknown): string {
-  const city = typeof raw === "string" ? raw.replace(/[^\p{L}\p{N} .,'-]/gu, "").trim().slice(0, 60) : "";
-  return city || "Lisbon";
-}
+export type AppDeps = { checkout: Checkout; gate: Gate; feed: Feed; log: Log; payouts?: Payouts; forecasts?: ForecastService; siteDir?: string };
 
-/** A deterministic demo forecast: cheap to compute, shaped like a real paid API response. */
-export function forecast(city: string) {
-  const day = new Date().toISOString().slice(0, 10);
-  const h = createHash("sha256").update(`${city.toLowerCase()}|${day}`).digest();
-  const conditions = ["clear", "partly cloudy", "overcast", "light rain", "showers", "windy", "fog"];
-  const hours = Array.from({ length: 6 }, (_, i) => ({
-    hour: `${String(9 + i * 2).padStart(2, "0")}:00`,
-    tempC: 8 + (h[i]! % 18),
-    rainPct: h[i + 6]! % 100,
-    windKph: 4 + (h[i + 12]! % 30),
-    sky: conditions[h[i + 18]! % conditions.length]!,
-  }));
-  const temps = hours.map((x) => x.tempC);
-  const wettest = hours.reduce((a, b) => (b.rainPct > a.rainPct ? b : a));
-  const windiest = hours.reduce((a, b) => (b.windKph > a.windKph ? b : a));
-  const umbrella = wettest.rainPct >= 50;
-  return {
-    city,
-    date: day,
-    summary: `${city}, ${day}: ${Math.min(...temps)} to ${Math.max(...temps)} °C, ${umbrella ? `take an umbrella (${wettest.rainPct}% rain at ${wettest.hour})` : `mostly dry (at most ${wettest.rainPct}% rain)`}, windiest at ${windiest.hour} (${windiest.windKph} km/h).`,
-    hours,
-    model: "x429-demo-forecast-1",
-    note: "Demo data for the x429 queue, not a real weather service.",
-  };
-}
-
-export type AppDeps = { checkout: Checkout; gate: Gate; feed: Feed; log: Log; payouts?: Payouts; siteDir?: string };
-
-export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDeps): Server {
+export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, siteDir }: AppDeps): Server {
   const cfg = checkout.cfg;
+  const forecasts = fc ?? { get: (city: unknown) => demoForecast(typeof city === "string" && city ? city : "Lisbon") };
 
   /** Parses a JSON object body (or none). */
   async function objectBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -119,13 +89,66 @@ export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDe
 
   const NEXT_USE = "Keep the token: it is the only proof that this ticket is yours. Call /use (PayBox plugin: x429_use) with it; it answers with your position and ETA while you wait, and with the API result once you are served.";
 
+  /** The busy API's answer for an admitted ticket. */
+  function apiResult(city: unknown, a: Admission) {
+    return {
+      ...forecasts.get(city),
+      admitted: { via: "queue", ticketId: a.ticketId, waitedSeconds: a.waited, timesPassed: a.timesPassed, earned: a.earned, paid: a.paid, servedTx: a.servedTx },
+    };
+  }
+
+  function who(owner: Address): { who: string; demo: boolean } {
+    const demo = cfg.demoAgents.has(owner.toLowerCase());
+    return { who: `${owner.slice(0, 6)}…${owner.slice(-4)}${demo ? " (demo agent)" : ""}`, demo };
+  }
+
+  /** The receipt of a paid skip: who got what, what came back, what it bought. */
+  function receiptOf(s: SkipResult, served: ServeNow | undefined) {
+    const waitSavedSeconds = Math.round((s.passes * cfg.serviceIntervalMs) / 1000);
+    return {
+      newPosition: s.position,
+      fromPosition: s.fromPosition,
+      passed: s.passed.map((p) => ({ ticketId: p.ticketId, owner: p.owner, ...who(p.owner), amount: p.amount, amountUsd: fmtUsd(p.amount) })),
+      agentsPaid: s.passed.length,
+      paidToWaiting: s.compensation,
+      paidToWaitingUsd: fmtUsd(s.compensation),
+      operatorFee: s.fee,
+      operatorFeeUsd: fmtUsd(s.fee),
+      refund: s.refund,
+      refundUsd: fmtUsd(s.refund),
+      charged: s.cost,
+      chargedUsd: fmtUsd(s.cost),
+      waitSavedSeconds,
+      settlement: { status: "confirmed", txHash: s.txHash, explorerUrl: s.explorerUrl, network: `eip155:${cfg.chainId}` },
+      payouts: cfg.autoPayout ? `pushed automatically to the ${s.passed.length} wallet(s) passed` : "claimable by the agents passed",
+      served:
+        served?.status === "served"
+          ? { status: "served", serveTx: served.serveTx, serveConfirmed: served.serveConfirmed }
+          : { status: "queued", reason: served?.reason ?? "not_at_head", etaSeconds: served?.etaSeconds ?? eta(s.position) },
+      headline: `Skipped ~${waitSavedSeconds}s; ${s.passed.length} agent${s.passed.length === 1 ? "" : "s"} earned ${fmtUsd(s.compensation)}.`,
+    };
+  }
+
+  type Cached = { status: number; body: unknown; headers: Record<string, string>; expires: number };
+  /** Successful paid responses by payment (kind, payer, EIP-3009 nonce): a retry gets the same bytes. Memory only. */
+  const responses = new Map<string, Cached>();
+  const inflight = new Map<string, Promise<Cached | undefined>>();
+  function sweepResponses() {
+    const now = Date.now();
+    for (const [k, v] of responses) if (v.expires < now) responses.delete(k);
+    while (responses.size > 10_000) responses.delete(responses.keys().next().value!);
+  }
+
   /**
    * The two paid x402 resources. `POST /join` (body {skipPrice?}) creates a waiting ticket for the
-   * payer; `POST /skip` (body or query {target, skipPrice?, owner?}) moves the payer's ticket (or a new
-   * one) to `target`. Without a payment header both answer 402 with v1 `accepts` in the body and the
-   * v2 PAYMENT-REQUIRED header; with one they settle onchain and return a redeem token.
+   * payer; `POST /skip` (body or query {target, skipPrice?, owner?, city?}) moves the payer's ticket (or
+   * a new one) to `target`. Without a payment header both answer 402 with v1 `accepts` in the body and
+   * the v2 PAYMENT-REQUIRED header; with one they settle onchain and return a redeem token. A skip that
+   * reaches #1 while the service slot is free is served in the same request: the paid response carries
+   * the API result and a receipt. A retried paid request returns the identical response.
    */
   async function paid(kind: "join" | "skip", req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const t0 = performance.now();
     const body = await objectBody(req);
     const qs = url.searchParams;
     const rawPrice = qs.get("skipPrice") ?? body.skipPrice;
@@ -140,6 +163,7 @@ export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDe
       const rawOwner = qs.get("owner") ?? body.owner;
       ownerHint = rawOwner ? parseAddress(rawOwner, "owner") : undefined;
     }
+    const city = qs.get("city") ?? body.city;
     // body requests (the PayBox plugin) are priced on the plain path; query requests keep their URL
     const resource = kind === "skip" && qs.get("target") === null ? `${cfg.publicUrl}/skip` : undefined;
     const offer = (who: Address | undefined) =>
@@ -176,48 +200,102 @@ export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDe
     if (!payment) return paymentRequired(402, "X-PAYMENT (v1) or PAYMENT-SIGNATURE (v2) header is required");
     if ("error" in payment) return paymentRequired(400, payment.error, { message: payment.message });
     const payer = payment.payload.authorization.from;
+    const nonce = payment.payload.authorization.nonce;
 
-    try {
-      const r = kind === "join" ? await checkout.settleJoin(payment, skipPrice) : await checkout.settleSkip(payment, target, skipPrice);
-      const txHash = r.replayed ? (checkout.tokens.paymentTx(payer, payment.payload.authorization.nonce) ?? "") : r.txHash;
+    // idempotency on the EIP-3009 nonce: the same payment gets the same response, and is never charged twice
+    sweepResponses();
+    const key = `${kind}:${payer.toLowerCase()}:${nonce.toLowerCase()}`;
+    const hit = responses.get(key) ?? (await inflight.get(key));
+    if (hit) {
+      log({ evt: "paid_request_retried", kind, payer, nonce });
+      return send(res, hit.status, hit.body, { ...hit.headers, "x-429-idempotent-replay": "true" });
+    }
+
+    const run = async (): Promise<Cached> => {
+      let tSettled = 0;
+      let served: ServeNow | undefined;
+      const r =
+        kind === "join"
+          ? await checkout.settleJoin(payment, skipPrice)
+          : await checkout.settleSkip(payment, target, skipPrice, async (s) => {
+              tSettled = performance.now();
+              if (s.position === 1) served = await gate.serveNow(s.ticketId, (a) => apiResult(city, a), cfg.serveConfirm);
+            });
+      const tDone = performance.now();
+      const txHash = r.replayed ? (checkout.tokens.paymentTx(payer, nonce) ?? "") : r.txHash;
       const settlement = settlementResponse({ success: true, transaction: txHash, chainId: cfg.chainId, version: payment.version, payer });
-      const header = { [payment.version === 2 ? V2_RESPONSE_HEADER : V1_RESPONSE_HEADER]: encodeHeader(settlement) };
+      const timing = tSettled
+        ? `settle;dur=${(tSettled - t0).toFixed(0)}, serve;dur=${(tDone - tSettled).toFixed(0)}, total;dur=${(tDone - t0).toFixed(0)}`
+        : `total;dur=${(tDone - t0).toFixed(0)}`;
+      const headers = { [payment.version === 2 ? V2_RESPONSE_HEADER : V1_RESPONSE_HEADER]: encodeHeader(settlement), "server-timing": timing };
+      const expires = Math.max(Date.now() + 600_000, Number(payment.payload.authorization.validBefore) * 1000 + 600_000);
+      log({ evt: "paid_latency", kind, ms: Math.round(tDone - t0), settleMs: tSettled ? Math.round(tSettled - t0) : undefined, served: served?.status });
       if (r.replayed) {
-        return send(res, 200, {
-          ok: true,
-          kind,
-          ...r,
-          txHash,
-          etaSeconds: r.position ? eta(r.position) : null,
-          message: `This payment was already settled for ticket #${r.ticketId}; nothing was charged again. Here is a fresh token for it.`,
-          next: NEXT_USE,
-        }, header);
+        return {
+          status: 200,
+          headers,
+          expires,
+          body: {
+            ok: true,
+            kind,
+            ...r,
+            txHash,
+            etaSeconds: r.position ? eta(r.position) : null,
+            message: `This payment was already settled for ticket #${r.ticketId}; nothing was charged again. Here is a fresh token for it.`,
+            next: NEXT_USE,
+          },
+        };
       }
       if (r.refundedInFull) {
-        return send(res, 200, { ok: true, kind, ...r, message: "The payment arrived through a front-run transaction but the request was no longer possible; it was refunded in full." }, header);
+        return { status: 200, headers, expires, body: { ok: true, kind, ...r, message: "The payment arrived through a front-run transaction but the request was no longer possible; it was refunded in full." } };
       }
       if (kind === "join" && "fee" in r && !("passes" in r)) {
-        return send(res, 200, {
-          ok: true,
-          kind,
-          ...r,
-          feeUsd: fmtUsd(r.fee),
-          etaSeconds: eta(r.position),
-          message: `You joined at #${r.position} with a skip price of ${fmtUsd(r.skipPrice)}: anyone who passes you pays you that, automatically. Join fee ${fmtUsd(r.fee)}, refunded ${fmtUsd(r.refund)}.`,
-          next: NEXT_USE,
-        }, header);
+        return {
+          status: 200,
+          headers,
+          expires,
+          body: {
+            ok: true,
+            kind,
+            ...r,
+            feeUsd: fmtUsd(r.fee),
+            etaSeconds: eta(r.position),
+            message: `You joined at #${r.position} with a skip price of ${fmtUsd(r.skipPrice)}: anyone who passes you pays you that, automatically. Join fee ${fmtUsd(r.fee)}, refunded ${fmtUsd(r.refund)}.`,
+            next: NEXT_USE,
+          },
+        };
       }
       const s = r as SkipResult;
-      send(res, 200, {
-        ok: true,
-        kind,
-        ...s,
-        costUsd: fmtUsd(s.cost),
-        etaSeconds: eta(s.position),
-        payouts: cfg.autoPayout ? "the agents you passed are being paid automatically" : "the agents you passed can claim their compensation",
-        message: `You are now #${s.position}. Paid ${s.passes} agent(s) ${fmtUsd(s.compensation)} in total, fee ${fmtUsd(s.fee)}, refunded ${fmtUsd(s.refund)}.`,
-        next: NEXT_USE,
-      }, header);
+      const receipt = receiptOf(s, served);
+      const done = served as ServeNow | undefined;
+      const isServed = done?.status === "served";
+      return {
+        status: 200,
+        headers,
+        expires,
+        body: {
+          ok: true,
+          kind,
+          status: isServed ? "served" : "queued",
+          result: done?.status === "served" ? done.result : null,
+          receipt,
+          ...s,
+          costUsd: fmtUsd(s.cost),
+          etaSeconds: isServed ? 0 : eta(s.position),
+          message: isServed
+            ? `Served. ${receipt.headline} Charged ${fmtUsd(s.cost)}, refunded ${fmtUsd(s.refund)}.`
+            : `You are now #${s.position}. ${receipt.headline} Charged ${fmtUsd(s.cost)}, refunded ${fmtUsd(s.refund)}.`,
+          next: isServed ? "Done: `result` is the API answer and `receipt` the proof of what was paid to whom." : NEXT_USE,
+        },
+      };
+    };
+
+    const p = run();
+    inflight.set(key, p.catch(() => undefined));
+    try {
+      const c = await p;
+      responses.set(key, c);
+      send(res, c.status, c.body, c.headers);
     } catch (err) {
       if (!(err instanceof CheckoutError)) throw err;
       log({ evt: `${kind}_rejected`, reason: err.reason, message: err.message, payer });
@@ -229,6 +307,8 @@ export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDe
         [V1_RESPONSE_HEADER]: encodeHeader(failure),
         [V2_RESPONSE_HEADER]: encodeHeader(failure),
       });
+    } finally {
+      inflight.delete(key);
     }
   }
 
@@ -245,11 +325,7 @@ export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDe
   async function use(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await objectBody(req);
     const entry = tokenEntry(body);
-    const city = cityOf(body.city);
-    const st = await gate.use(entry.ticketId, (a) => ({
-      ...forecast(city),
-      admitted: { via: "queue", ticketId: a.ticketId, waitedSeconds: a.waited, timesPassed: a.timesPassed, earned: a.earned, paid: a.paid, servedTx: a.servedTx },
-    }));
+    const st = await gate.use(entry.ticketId, (a) => apiResult(body.city, a));
     const common = { ticketId: entry.ticketId, owner: entry.owner };
     if (st.status === "used") {
       return send(res, 200, { status: "served", ...common, replayed: st.replayed, expiresInSeconds: st.expiresInSeconds, result: st.result });
@@ -257,7 +333,9 @@ export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDe
     if (st.status === "waiting" || st.status === "serving") {
       const position = st.status === "waiting" ? st.position : 0;
       const front = position > 1 ? await checkout.quote(1, entry.owner).catch(() => undefined) : undefined;
+      const offer = gate.offer(checkout.reader.latest, { ticketId: entry.ticketId, owner: entry.owner, position, status: st.status });
       return send(res, 429, {
+        skip: offer.skip,
         status: st.status,
         ...common,
         position,
@@ -325,22 +403,28 @@ export function createApp({ checkout, gate, feed, log, payouts, siteDir }: AppDe
     });
   }
 
+  /**
+   * The busy API. Saturated: 429 with a small offer (position, ETA, the live price to #1 and how to pay
+   * it) plus Retry-After / X-429-* / Link headers. With `X-429-Token` it answers for that ticket: the
+   * result once served, else your position and the price from there.
+   */
   async function busyApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    const d = await gate.admit(req);
-    if (d.kind === "reject") {
-      return send(res, d.status, d.body, {
-        ...(d.retryAfterS ? { "retry-after": String(d.retryAfterS) } : {}),
-        "x-429-queue": `${cfg.contract}/${cfg.queueId}`,
-      });
+    const city = url.searchParams.get("city");
+    const rawToken = req.headers["x-429-token"];
+    if (rawToken !== undefined) {
+      const entry = tokenEntry({ token: Array.isArray(rawToken) ? rawToken[0] : rawToken });
+      const st = await gate.use(entry.ticketId, (a) => apiResult(city, a));
+      if (st.status === "used") return send(res, 200, st.result);
+      if (st.status === "waiting" || st.status === "serving") {
+        const d = gate.reject429(checkout.reader.latest, { ticketId: entry.ticketId, owner: entry.owner, position: st.status === "waiting" ? st.position : 1, status: st.status });
+        return send(res, 429, d.body, d.headers);
+      }
+      throw new CheckoutError(410, st.status, "this ticket can no longer be used; join again");
     }
-    const city = cityOf(url.searchParams.get("city"));
+    const d = await gate.admit(req);
+    if (d.kind === "reject") return send(res, d.status, d.body, d.headers ?? {});
     const a = d.admission;
-    send(res, 200, {
-      ...forecast(city),
-      admitted: a
-        ? { via: "queue", ticketId: a.ticketId, waitedSeconds: a.waited, timesPassed: a.timesPassed, earned: a.earned, paid: a.paid, servedTx: a.servedTx }
-        : { via: "direct" },
-    });
+    send(res, 200, a ? apiResult(city, a) : { ...forecasts.get(city), admitted: { via: "direct" } });
   }
 
   async function staticFile(res: ServerResponse, pathname: string): Promise<boolean> {

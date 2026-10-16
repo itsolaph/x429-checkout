@@ -222,8 +222,8 @@ function createServer() {
     {
       title: "x429 queue status",
       description:
-        "Shows the x429 queue in front of a busy API: how many agents wait, each position's posted skip price, what it costs to reach each position now, the join fee and the wait per position. " +
-        "Pass your redeem token to see your own ticket. Next: x429_join to get in line, x429_quote then x429_skip to move up, x429_use to call the API once served.",
+        "Free price discovery, no payment: the x429 line in front of a busy API (HTTP 429 with a price). Shows how many agents wait (demo agents are labeled), each position's posted skip price, what reaching each position costs right now, the join fee and the wait. " +
+        "Pass your redeem token to see your own ticket. Next: x429_quote, then x429_skip to pay and get the API answer in the same call; or x429_join to wait for free-ish and x429_use later.",
       inputSchema: z.object({ token: token.optional() }).strict(),
       outputSchema: statusOutput,
       annotations: READ,
@@ -294,8 +294,8 @@ function createServer() {
     {
       title: "Quote a skip",
       description:
-        "Prices moving to `targetPosition` (1 = served next) right now: the cost (paid to each agent you pass at its posted price, plus any operator fee), the ceiling your payment will authorize (cost plus a buffer, unused part refunded) and when the quote expires. " +
-        "Pass your token (or wallet address) if you already wait in line, so the quote starts from your position. Next: x429_skip with the same target.",
+        "Free price discovery, no payment: what moving to `targetPosition` (1 = served next) costs right now. The cost is paid to each agent you pass at its own posted price (plus any operator fee); the ceiling is what the payment authorizes (cost + buffer, the unused part refunded in the same transaction); the quote has an expiry. " +
+        "Pass your token (or wallet address) if you already wait in line. Next: show the user the cost, then x429_skip with the same target.",
       inputSchema: z.object({ targetPosition: z.number().int().min(1).max(256), token: token.optional(), owner: address.optional() }).strict(),
       outputSchema: quoteOutput,
       annotations: READ,
@@ -358,21 +358,23 @@ function createServer() {
     {
       title: "Skip ahead (x402)",
       description:
-        "Returns a PayBox x402 payment proposal that moves you to `targetPosition` (1 = served next), paying each agent you pass its posted price. If you have no ticket yet, the same payment joins you first. " +
-        "The proposal's maximum is the live ceiling from x429_quote; you are charged the actual cost and the rest is refunded in the same transaction. Pass your token (or wallet address) if you already wait in line. " +
-        "After PayBox pays, the paid response contains your new position and a fresh redeem token. Then call x429_use with the token.",
+        "Returns a PayBox x402 payment proposal (one passkey approval) that moves you to `targetPosition` (1 = served next), paying each agent you pass its own posted price; they get the USDC automatically. No ticket yet? The same payment joins you first. " +
+        "The maximum is the live ceiling from x429_quote; you are charged the actual cost and the rest is refunded in the same transaction. " +
+        "For targetPosition 1 the paid response contains the API answer (`result`, e.g. the forecast for `city`) and a `receipt` (who was paid what, fee, refund, basescan link, wait saved): show both to the user, nothing else to call. " +
+        "If the service is busy it holds your position, ETA and a redeem token instead: then call x429_use with the token.",
       inputSchema: z
         .object({
           targetPosition: z.number().int().min(1).max(256),
           token: token.optional(),
           owner: address.optional().describe("Your wallet address, if you have no token but already wait in line"),
           skipPriceUsdc: usdcDecimal.optional().describe("Only for a new ticket: what you are paid each time someone passes you (at most 0.1 USDC)"),
+          city: z.string().min(1).max(60).optional().describe("For the busy API's answer (a city forecast), e.g. \"Lisbon\""),
         })
         .strict(),
       outputSchema: x402OutputSchema,
       annotations: PAY,
     },
-    async ({ targetPosition, token: t, owner, skipPriceUsdc }) =>
+    async ({ targetPosition, token: t, owner, skipPriceUsdc, city }) =>
       guard(async () => {
         const b = base();
         const skipPrice = skipPriceUsdc === undefined ? undefined : atomicAmount(skipPriceUsdc, 6);
@@ -386,7 +388,7 @@ function createServer() {
           chain: "eip155:8453",
           url: `${b.proposal}/skip`,
           method: "POST",
-          body: { target: targetPosition, ...(who ? { owner: who } : {}), ...(skipPrice === undefined ? {} : { skipPrice }) },
+          body: { target: targetPosition, ...(who ? { owner: who } : {}), ...(skipPrice === undefined ? {} : { skipPrice }), ...(city ? { city } : {}) },
           maxAmount: str(r.data.maxAmountRequired),
           expiresAt: whole(expires),
         });

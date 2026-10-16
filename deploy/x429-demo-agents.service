@@ -1,0 +1,27 @@
+# systemd unit for the demo-agent service (keeps 3–5 labeled demo tickets waiting). Example paths, as in
+# x429-checkout.service; its env file is separate (/etc/x429/demo-agents.env, chmod 600) and points at
+# the keys file (DEMO_KEYS_FILE). It exits by itself when every demo wallet is low: no restart then.
+#
+#   sudo cp deploy/x429-demo-agents.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now x429-demo-agents
+[Unit]
+Description=x429 demo agents (labeled demo tickets for the public demo)
+After=network-online.target x429-checkout.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=x429
+Group=x429
+WorkingDirectory=/opt/x429-checkout
+ExecStart=/usr/bin/env bash /opt/x429-checkout/scripts/start-demo-agents.sh /etc/x429/demo-agents.env
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

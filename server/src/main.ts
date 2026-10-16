@@ -7,6 +7,7 @@ import { Checkout } from "./checkout.ts";
 import { loadConfig } from "./config.ts";
 import { Feed } from "./feed.ts";
 import { Gate } from "./gate.ts";
+import { ForecastService } from "./forecast.ts";
 import { Payouts } from "./payouts.ts";
 import { TokenStore } from "./tokens.ts";
 import { toJson } from "./json.ts";
@@ -35,12 +36,14 @@ const checkout = new Checkout(cfg, client, reader, relayer, log, tokens);
 const gate = new Gate(checkout, log);
 const feed = new Feed(client, cfg.contract, cfg.queueId, cfg.deployBlock);
 const payouts = new Payouts(checkout, feed, log);
-const server = createApp({ checkout, gate, feed, log, payouts, siteDir: cfg.siteDir ? resolve(cfg.siteDir) : undefined });
+const forecasts = new ForecastService(cfg.forecastSource);
+const server = createApp({ checkout, gate, feed, log, payouts, forecasts, siteDir: cfg.siteDir ? resolve(cfg.siteDir) : undefined });
 
 setInterval(() => void reader.refresh().catch(() => {}), cfg.pollMs);
 gate.start();
 feed.start(cfg.pollMs);
 if (cfg.autoPayout) payouts.start(cfg.payoutIntervalMs);
+forecasts.start();
 server.listen(cfg.port, cfg.host, () => {
   log({
     evt: "listening",

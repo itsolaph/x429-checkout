@@ -42,6 +42,8 @@ export function chainFor(cfg: Pick<Config, "chainId" | "rpcUrl">): Chain {
 export function makePublicClient(cfg: Pick<Config, "chainId" | "rpcUrl">): PublicClient {
   return createPublicClient({
     chain: chainFor(cfg),
+    // receipts are polled every 250 ms: a paid request waits for its settlement, so this is latency
+    pollingInterval: 250,
     transport: http(cfg.rpcUrl, { retryCount: 3, retryDelay: 400, timeout: 20_000 }),
   }) as PublicClient;
 }
@@ -119,6 +121,29 @@ export class Relayer {
   /** Simulates and sends a call to the checkout contract. Must be called inside `exclusive`. */
   async call(functionName: string, args: readonly unknown[], note?: string): Promise<TransactionReceipt> {
     return this.callContract(this.contract, checkoutAbi, functionName, args, note);
+  }
+
+  /**
+   * Simulates and sends a call without waiting for it to be mined. `receipt` settles later (and
+   * records gas); a revert on chain rejects it. Must be called inside `exclusive`; the next call
+   * picks the next nonce from the node's pending count.
+   */
+  async send(functionName: string, args: readonly unknown[], note?: string): Promise<{ hash: Hash; receipt: Promise<TransactionReceipt> }> {
+    let request;
+    try {
+      ({ request } = await this.client.simulateContract({ address: this.contract, abi: checkoutAbi, functionName, args, account: this.account } as never));
+    } catch (err) {
+      throw decodeRevert(err) ?? err;
+    }
+    const hash = await this.wallet.writeContract(request as never);
+    const receipt = this.client.waitForTransactionReceipt({ hash, timeout: 60_000 }).then((r) => {
+      this.gas.push({ fn: functionName, gasUsed: r.gasUsed, tx: hash, note });
+      if (this.gas.length > 500) this.gas.shift();
+      if (r.status !== "success") throw new RevertError("Reverted", [], `${functionName} reverted in ${hash}`);
+      return r;
+    });
+    receipt.catch(() => {}); // callers attach their own handlers
+    return { hash, receipt };
   }
 
   async callContract(

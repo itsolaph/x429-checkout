@@ -581,7 +581,13 @@ export class Checkout {
    * Verifies an x402 `exact` payment and settles it onchain with `skip`. Throws CheckoutError with
    * an x402 error reason; nothing moves unless the result is returned.
    */
-  async settleSkip(payment: DecodedPayment, target: number, newTicketSkipPrice: bigint): Promise<SkipResult | ReplayResult> {
+  async settleSkip(
+    payment: DecodedPayment,
+    target: number,
+    newTicketSkipPrice: bigint,
+    /** Runs inside the same `exclusive` step right after settlement (e.g. serve a new head at once). */
+    afterSettle?: (r: SkipResult) => Promise<void>,
+  ): Promise<SkipResult | ReplayResult> {
     const relayer = this.requireRelayer();
     const { auth, fail } = await this.verifyPayment(payment);
     return relayer.exclusive(async () => {
@@ -606,6 +612,7 @@ export class Checkout {
       if (!result.refundedInFull) {
         this.tokens.recordPayment(auth.from, auth.nonce, result.ticketId, receipt.transactionHash);
         result.token = this.tokens.issue(result.ticketId, auth.from);
+        if (afterSettle) await afterSettle(result).catch((err) => this.log({ evt: "after_settle_error", error: String((err as Error)?.message ?? err).split("\n")[0] }));
         this.onPassed?.(result.passed.map((p) => p.owner));
       }
       return result;

@@ -84,14 +84,17 @@ export class SimAgent {
     if (!String(url).startsWith("https://")) throw new Error(`proposal url must be https: ${url}`);
     const local = route(url);
     const pr = await this.paymentRequired(local, method, body);
+    const t402 = performance.now();
     const req = version === 2 ? pr.v2.accepts[0] : pr.v1;
     const amount = BigInt(version === 2 ? req.amount : req.maxAmountRequired);
     if (req.asset.toLowerCase() !== String(proposal.payment.asset).toLowerCase()) throw new Error(`402 asset ${req.asset} differs from the proposal`);
     if (amount > BigInt(proposal.payment.maxAmount)) throw new Error(`402 asks ${amount}, above the proposal maximum ${proposal.payment.maxAmount}`);
     const payload = await this.signExact({ asset: req.asset, payTo: req.payTo, amount, maxTimeoutSeconds: req.maxTimeoutSeconds });
     const headers = version === 2 ? this.v2Header(payload, req, pr.v2.resource) : this.v1Header(payload);
+    const t0 = performance.now();
     const result = await this.http(method, local, body, headers);
-    return { pr, amount, payload, headers, result };
+    // ms: the paid request alone; withSigningMs: from the live 402 to the paid response (no passkey here)
+    return { pr, amount, payload, headers, result, ms: performance.now() - t0, withSigningMs: performance.now() - t402 };
   }
 
   /** Gasless claim to `recipient` (default self). Returns the signed body too, so tests can replay it. */
@@ -153,8 +156,9 @@ export class SimAgent {
       maxTimeoutSeconds: req.maxTimeoutSeconds,
     }, { value: opts.value });
     const headers = v2 ? this.v2Header(payload, req, pr.v2.resource) : this.v1Header(payload);
+    const t0 = performance.now();
     const result = await this.http("POST", path, opts.body, headers);
-    return { pr, payload, headers, result };
+    return { pr, payload, headers, result, ms: performance.now() - t0 };
   }
 
   /** Calls the busy API, optionally redeeming a served ticket (EIP-191 signature, PayBox op message). */

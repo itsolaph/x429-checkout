@@ -9,7 +9,7 @@ import { parseEventLogs, verifyMessage, type Address, type Hash, type Hex } from
 import { checkoutAbi } from "./abi.ts";
 import type { Checkout, Log } from "./checkout.ts";
 import { PROTOCOL_VERSION, SIGNATURE_HEADER, TICKET_HEADER, caip2, fmtUsd, ticketMessage } from "./protocol.ts";
-import { isQuoteError, quoteSkip, type Snapshot } from "./queue.ts";
+import { isQuoteError, quoteSkip, type Quote, type Snapshot } from "./queue.ts";
 
 export type Admission = {
   ticketId: bigint;
@@ -32,9 +32,17 @@ export type TicketStatus =
   | { status: "serving"; ticketId: bigint; etaSeconds: number }
   | { status: "expired" | "left" | "unknown"; ticketId: bigint };
 
+/** What happened when a paid skip to #1 asked to be served inside its own request. */
+export type ServeNow =
+  | { status: "served"; admission: Admission; result: unknown; serveTx: Hash; serveConfirmed: boolean }
+  | { status: "busy"; reason: "slot_busy" | "not_head" | "serve_failed"; etaSeconds: number };
+
+/** You, in a 429: the ticket behind a redeem token. */
+export type You = { ticketId: bigint; owner: Address; position: number; status: string };
+
 export type GateDecision =
   | { kind: "admit"; via: "direct" | "queue"; admission?: Admission }
-  | { kind: "reject"; status: 429 | 403; body: unknown; retryAfterS?: number };
+  | { kind: "reject"; status: 429 | 403; body: unknown; retryAfterS?: number; headers?: Record<string, string> };
 
 export type TicketState = { id: string; status: "waiting" | "serving"; position: number } | null;
 
@@ -48,7 +56,9 @@ export class Gate {
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly admissions = new Map<bigint, Admission>();
   private readonly consumed = new Set<bigint>();
-  readonly stats = { direct: 0, queued: 0, rejected429: 0, forbidden403: 0, served: 0, serveErrors: 0 };
+  /** Heads that paid to be #1: they skip the admission round when the slot frees up. */
+  private readonly paidHeads = new Set<bigint>();
+  readonly stats = { direct: 0, queued: 0, rejected429: 0, forbidden403: 0, served: 0, servedInRequest: 0, serveErrors: 0 };
 
   private readonly checkout: Checkout;
   private readonly log: Log;
@@ -149,9 +159,67 @@ export class Gate {
     };
   }
 
+  /**
+   * The small JSON a 429 carries: where you are (your ticket if the request had a redeem token),
+   * the live price to #1 and exactly what to call to pay it. The full descriptor is at GET /x429.
+   */
+  offer(snap: Snapshot | undefined, you?: You) {
+    const cfg = this.cfg;
+    const position = you?.position || (snap?.length ?? 0) + 1;
+    const q = snap && position > 1 ? quoteSkip(snap, you?.owner ?? null, 1, cfg.slippageBps) : undefined;
+    const front = q && !isQuoteError(q) ? q : undefined;
+    const eta = this.etaSeconds(position, snap);
+    return {
+      error: "too_many_requests",
+      message: this.headline(snap, position, front),
+      position,
+      queueLength: snap?.length ?? 0,
+      etaSeconds: eta,
+      you: you ? { ticketId: you.ticketId.toString(), status: you.status, position: you.position } : null,
+      skip: front
+        ? {
+            targetPosition: 1,
+            passes: front.passes,
+            cost: front.cost.toString(),
+            costUsd: fmtUsd(front.cost),
+            maxAmount: front.maxAmountRequired.toString(),
+            waitSavedSeconds: Math.max(0, eta - this.etaSeconds(1, snap)),
+            method: "POST",
+            url: `${cfg.publicUrl}/skip`,
+            body: { target: 1, ...(you ? { owner: you.owner } : {}) },
+            payment: "x402 exact, USDC on Base; the unused part of maxAmount is refunded",
+            plugin: { tool: "x429_skip", arguments: { targetPosition: 1 } },
+            answer: "the paid response contains the API result and a receipt",
+          }
+        : null,
+      wait: you
+        ? { plugin: { tool: "x429_use", arguments: { token: "<your token>" } } }
+        : { method: "POST", url: `${cfg.publicUrl}/join`, plugin: { tool: "x429_join", arguments: {} } },
+      next: front
+        ? `Pay ${fmtUsd(front.cost)} to go first (x429_skip, or POST /skip {"target":1} with x402); the paid response is the answer. Or wait about ${eta} s${you ? " and call x429_use" : " after x429_join"}.`
+        : `Retry in about ${eta} s.`,
+      descriptor: `${cfg.publicUrl}/x429`,
+    };
+  }
+
+  /** Headers that let an agent act on a 429 without parsing the body. */
+  offerHeaders(body: ReturnType<Gate["offer"]>): Record<string, string> {
+    const h: Record<string, string> = {
+      "retry-after": String(body.etaSeconds),
+      "x-429-position": String(body.position),
+      "x-429-queue": `${this.cfg.contract}/${this.cfg.queueId}`,
+    };
+    if (body.skip) {
+      h["x-429-skip-cost"] = body.skip.cost;
+      h["x-429-skip-url"] = body.skip.url;
+      h.link = `<${body.skip.url}>; rel="payment"; title="x402 skip to #1"`;
+    }
+    return h;
+  }
+
   /** One sentence for agents: where you are and what skipping costs. */
-  headline(snap: Snapshot | undefined, position: number): string {
-    const front = snap && snap.length > 0 ? quoteSkip(snap, null, 1, this.cfg.slippageBps) : undefined;
+  headline(snap: Snapshot | undefined, position: number, quote?: Quote): string {
+    const front = quote ?? (snap && snap.length > 0 ? quoteSkip(snap, null, 1, this.cfg.slippageBps) : undefined);
     if (!front || isQuoteError(front)) return `Busy. You would be #${position} in line.`;
     const n = front.passes;
     return `Busy. You are #${position} in line; skipping to the front costs ${fmtUsd(front.cost)} right now, paid to the ${n} agent${n === 1 ? "" : "s"} you pass.`;
@@ -175,13 +243,17 @@ export class Gate {
   }
 
   private tooMany(snap: Snapshot | undefined, ticket: TicketState, retryAfterS: number, position: number): GateDecision {
+    void ticket;
+    void retryAfterS;
+    void position;
+    return this.reject429(snap);
+  }
+
+  /** A 429 with the small offer body and its headers. */
+  reject429(snap: Snapshot | undefined, you?: You): GateDecision & { kind: "reject" } {
     this.stats.rejected429++;
-    return {
-      kind: "reject",
-      status: 429,
-      retryAfterS,
-      body: { error: "too_many_requests", message: this.headline(snap, position), x429: this.descriptor(snap, ticket) },
-    };
+    const body = this.offer(snap, you);
+    return { kind: "reject", status: 429, retryAfterS: body.etaSeconds, body, headers: this.offerHeaders(body) };
   }
 
   private forbidden(reason: string, ticketId?: bigint): GateDecision {
@@ -290,6 +362,84 @@ export class Gate {
     return { ...st, status: "used", result: adm.result, replayed };
   }
 
+  /**
+   * A paid skip just moved `ticketId` to #1: serve it inside the same request when the service slot is
+   * free, skipping the admission round. That round exists so a head that just arrived can still be
+   * outbid; a ticket that paid every ticket it passed its own posted price has settled that already,
+   * so nobody waiting is treated worse than they asked for. Must run inside the relayer's `exclusive`
+   * (right after the settlement). `confirm` waits for the serve receipt; otherwise the serve is sent
+   * and confirmed in the background (it is the operator's own transaction; the payer's transfer is
+   * already included).
+   */
+  async serveNow(ticketId: bigint, make: (adm: Admission) => unknown, confirm: boolean): Promise<ServeNow> {
+    const relayer = this.checkout.relayer!;
+    const now = Date.now();
+    const snap = this.checkout.reader.latest;
+    const head = snap?.tickets[0];
+    if (head?.id === ticketId) {
+      this.paidHeads.add(ticketId);
+      if (this.paidHeads.size > 1_000) this.paidHeads.delete(this.paidHeads.values().next().value!);
+    }
+    if (this.serving || now < this.busyUntil) {
+      return { status: "busy", reason: "slot_busy", etaSeconds: Math.max(1, Math.ceil((Math.max(this.busyUntil, now + 1000) - now) / 1000)) };
+    }
+    if (!head || head.id !== ticketId) return { status: "busy", reason: "not_head", etaSeconds: this.etaSeconds(1, snap) };
+    this.serving = true;
+    this.busyUntil = now + this.cfg.serviceIntervalMs;
+    const done = (ok: boolean) => {
+      this.serving = false;
+      this.lastServeAt = Date.now();
+      if (!ok) this.busyUntil = Math.max(this.busyUntil, Date.now() + 2000);
+      void this.checkout.reader.refresh().catch(() => {});
+    };
+    try {
+      const adm: Admission = {
+        ticketId,
+        owner: head.owner,
+        servedAt: now,
+        expiresAt: now + this.cfg.admissionTtlMs,
+        servedTx: "0x" as Hash,
+        waited: Math.max(0, (snap?.blockTime ?? 0) - head.joinedAt),
+        timesPassed: head.timesPassed,
+        earned: head.earned,
+        paid: head.paid,
+      };
+      let serveConfirmed = false;
+      if (confirm) {
+        const receipt = await relayer.call("serve", [this.cfg.queueId, 1], "serve (paid skip)");
+        adm.servedTx = receipt.transactionHash;
+        serveConfirmed = true;
+        done(true);
+      } else {
+        const sent = await relayer.send("serve", [this.cfg.queueId, 1], "serve (paid skip)");
+        adm.servedTx = sent.hash;
+        sent.receipt.then(
+          (r) => {
+            this.log({ evt: "served", via: "paid_skip", ticketId, tx: r.transactionHash, gasUsed: r.gasUsed });
+            done(true);
+          },
+          (err) => {
+            this.stats.serveErrors++;
+            this.log({ evt: "serve_error", via: "paid_skip", ticketId, error: String((err as Error)?.message ?? err).split("\n")[0] });
+            done(false);
+          },
+        );
+      }
+      adm.result = make(adm);
+      this.admissions.set(ticketId, adm);
+      this.stats.served++;
+      this.stats.queued++;
+      this.stats.servedInRequest++;
+      this.log({ evt: "admit", via: "paid_skip", ticketId, owner: adm.owner, serveTx: adm.servedTx, confirmed: serveConfirmed });
+      return { status: "served", admission: adm, result: adm.result, serveTx: adm.servedTx, serveConfirmed };
+    } catch (err) {
+      this.stats.serveErrors++;
+      this.log({ evt: "serve_error", via: "paid_skip", ticketId, error: String((err as Error)?.message ?? err).split("\n")[0] });
+      done(false);
+      return { status: "busy", reason: "serve_failed", etaSeconds: this.etaSeconds(1, snap) };
+    }
+  }
+
   /** Serves the head when the service is free and the head's admission round is over. */
   async operatorTick(): Promise<void> {
     const relayer = this.checkout.relayer;
@@ -305,7 +455,9 @@ export class Gate {
     const now = Date.now();
     if (now < this.busyUntil) return;
     const head = snap.tickets[0]!;
-    if (now < head.firstSeenMs + this.cfg.minQueueMs) return; // admission round still open
+    // a queue of demo agents only is kept waiting: serving it would only make them pay to rejoin
+    if (this.cfg.holdDemoOnly && this.cfg.demoAgents.size > 0 && snap.tickets.every((t) => this.cfg.demoAgents.has(t.owner.toLowerCase()))) return;
+    if (!this.paidHeads.has(head.id) && now < head.firstSeenMs + this.cfg.minQueueMs) return; // admission round still open
     this.serving = true;
     try {
       const receipt = await relayer.exclusive(() => relayer.call("serve", [this.cfg.queueId, 1], "serve"));

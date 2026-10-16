@@ -36,6 +36,12 @@ export type Config = {
   payoutIntervalMs: number;
   /** Addresses of the operator's own demo agents, labeled as such in /queue, /feed and the dashboard. */
   demoAgents: Set<string>;
+  /** Wait for the serve receipt before answering a paid skip that is served at once (else confirm async). */
+  serveConfirm: boolean;
+  /** Do not serve while every waiting ticket is a demo agent's (nobody real waits, nothing to spend). */
+  holdDemoOnly: boolean;
+  /** "open-meteo" (cached real data, demo fallback) or "demo". */
+  forecastSource: string;
   /** Relayed joins per minute per client IP (each costs the operator gas). */
   joinsPerMinute: number;
   pollMs: number;
@@ -98,6 +104,9 @@ export function loadConfig(): Config {
     dataDir: process.env.X429_DATA_DIR || undefined,
     autoPayout: env("X429_AUTO_PAYOUT", "1") !== "0",
     payoutIntervalMs: int("X429_PAYOUT_INTERVAL_MS", 3_000),
+    serveConfirm: env("X429_SERVE_CONFIRM", "0") === "1",
+    holdDemoOnly: env("X429_HOLD_DEMO_ONLY", "1") !== "0",
+    forecastSource: env("X429_FORECAST_SOURCE", "open-meteo"),
     demoAgents: new Set(
       env("X429_DEMO_AGENTS", "")
         .split(",")
