@@ -6,7 +6,8 @@
 #
 # Nothing is sent to a public network: the public RPC is only read by anvil to build the fork.
 #
-# Caller sets: WORK (work dir), TAG (log prefix), FEE_BPS, SERVICE_INTERVAL_MS, MIN_QUEUE_MS, JOIN_FEE (units).
+# Caller sets: WORK (work dir), TAG (log prefix), FEE_BPS, SERVICE_INTERVAL_MS, MIN_QUEUE_MS, JOIN_FEE (units),
+# AUTO_PAYOUT (1 = operator pushes compensation, default; 0 = owners claim).
 # Env: E2E_RPC_URL (fork source), E2E_FORK_BLOCK (pinned block, default 52621900), E2E_KEEP=1.
 # Exports: RPC, API, CONTRACT, QUEUE_ID, DEPLOY_BLOCK, USDC, AGENT_KEYS[], WATCHER_KEY, PIDS[].
 
@@ -146,7 +147,7 @@ start_stack() {
   X429_RPC_URL="$RPC" X429_CHAIN_ID=8453 X429_CONTRACT="$CONTRACT" X429_QUEUE_ID="$QUEUE_ID" \
   X429_OPERATOR_KEY_FILE="$WORK/operator.key" X429_PORT="$port" X429_PUBLIC_URL="$API" \
   X429_SERVICE_INTERVAL_MS="$SERVICE_INTERVAL_MS" X429_MIN_QUEUE_MS="$MIN_QUEUE_MS" X429_POLL_MS=500 \
-  X429_DEPLOY_BLOCK="$DEPLOY_BLOCK" X429_SITE_DIR="$ROOT/site" X429_DATA_DIR="$WORK/data" X429_PAYOUT_INTERVAL_MS=1000 \
+  X429_DEPLOY_BLOCK="$DEPLOY_BLOCK" X429_SITE_DIR="$ROOT/site" X429_DATA_DIR="$WORK/data" X429_PAYOUT_INTERVAL_MS=1000 X429_AUTO_PAYOUT="${AUTO_PAYOUT:-1}" \
     node server/src/main.ts >"$WORK/server.log" 2>&1 &
   PIDS+=("$!")
   for _ in $(seq 1 80); do

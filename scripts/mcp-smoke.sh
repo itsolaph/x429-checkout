@@ -12,6 +12,7 @@ TAG=mcp
 FEE_BPS=300
 SERVICE_INTERVAL_MS=4000
 MIN_QUEUE_MS=60000
+AUTO_PAYOUT=0 # this smoke test covers the legacy pull path (EIP-712 claim)
 # shellcheck source=lib/fork-stack.sh
 source "$ROOT/scripts/lib/fork-stack.sh"
 
