@@ -52,6 +52,30 @@ contract X429CheckoutForkTest is CheckoutTestBase {
         assertEq(usdc.balanceOf(address(checkout)), 0);
     }
 
+    /// The x402-only user side on real USDC: paid joins, a paid skip, compensation pushed by the operator.
+    function test_fork_paidJoinsSkipAndAutomaticPayout() public {
+        vm.prank(operator);
+        checkout.setJoinFee(qid, 1_000);
+        address[] memory owners = new address[](rivals.length);
+        for (uint256 i = 0; i < rivals.length; ++i) {
+            _fund(rivals[i], 10_000);
+            owners[i] = rivals[i];
+            X429Checkout.Authorization memory a = _auth(rivalPks[i], 1_000, keccak256(abi.encode("pj", i)));
+            vm.prank(operator);
+            checkout.joinPaid(qid, BASE_PRICE, a);
+        }
+        (,, uint256 compensation, uint256 fee) = checkout.quoteSkip(qid, payer, 1);
+        _skip(1, 2_000, _auth(payerPk, (compensation + fee) * 12 / 10, keccak256("ps")));
+        vm.prank(operator);
+        assertEq(checkout.payoutBatch(owners), compensation);
+        for (uint256 i = 0; i < rivals.length; ++i) {
+            assertEq(usdc.balanceOf(rivals[i]), 10_000 - 1_000 + BASE_PRICE, "join fee out, its price in");
+            assertEq(rivals[i].balance, 0);
+        }
+        assertEq(checkout.totalClaimable(), 0);
+        assertEq(usdc.balanceOf(address(checkout)), checkout.totalFees());
+    }
+
     function test_fork_frontRunIsDetectedAndApplied() public {
         _rivalsJoin();
         X429Checkout.Authorization memory a = _auth(payerPk, 1_000_000, keccak256("fr"));

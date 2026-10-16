@@ -7,8 +7,8 @@ import {X429Checkout} from "../src/X429Checkout.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {Signatures} from "./utils/Signatures.sol";
 
-/// @notice Drives the contract with random joins, skips (normal and front-run), serves, leaves, claims
-///         and fee withdrawals, and keeps ghost books to check against.
+/// @notice Drives the contract with random joins (signed and paid), skips (normal and front-run), serves,
+///         leaves, claims, operator payouts and fee withdrawals, and keeps ghost books to check against.
 contract Handler is Test {
     X429Checkout public immutable checkout;
     MockUSDC public immutable token;
@@ -26,7 +26,13 @@ contract Handler is Test {
     bool public ghostOvercharged;
     /// Set if anyone but the operator managed to relay a join.
     bool public ghostAccessBroken;
+    /// Set if a payout moved USDC anywhere but from the contract to the owner, or not exactly its claimable.
+    bool public ghostPayoutMisdirected;
+    /// Set if a paid join charged anything other than exactly the join fee.
+    bool public ghostJoinOvercharged;
     uint256 public ghostSkips;
+    uint256 public ghostPaidJoins;
+    uint256 public ghostPayouts;
     uint256 public ghostFrontRuns;
 
     X429Checkout.Authorization[] internal pending;
@@ -57,6 +63,68 @@ contract Handler is Test {
         bytes memory sig = Signatures.join(checkout, pks[who], qid, price, nonce, deadline);
         vm.prank(operator);
         checkout.joinWithSig(actors[who], qid, price, nonce, deadline, sig);
+    }
+
+    /// A join paid with an x402 authorization (value at or above the join fee).
+    function joinPaid(uint256 who, uint128 price, uint256 extra) external {
+        who = bound(who, 0, actors.length - 1);
+        if (checkout.activeTicket(qid, actors[who]) != 0) return;
+        X429Checkout.Queue memory q = checkout.queueInfo(qid);
+        if (q.length >= q.maxLength) return;
+        uint256 fee = checkout.joinFee(qid);
+        X429Checkout.Authorization memory a = _authorization(who, fee + bound(extra, 0, 10_000));
+        uint256 had = token.balanceOf(a.from);
+        vm.prank(operator);
+        (, uint256 charged, uint256 refund) = checkout.joinPaid(qid, uint128(bound(price, 0, 50_000)), a);
+        if (charged != fee || refund != a.value - fee || token.balanceOf(a.from) != had - fee) {
+            ghostJoinOvercharged = true;
+        }
+        ghostPaidJoins++;
+    }
+
+    /// The operator pushes an owner's compensation; nobody else's balance may change.
+    function payout(uint256 who, bool batch) external {
+        who = bound(who, 0, actors.length - 1);
+        address owner = actors[who];
+        uint256 owed = checkout.claimable(owner);
+        uint256[] memory balances = new uint256[](actors.length);
+        for (uint256 i = 0; i < actors.length; ++i) {
+            balances[i] = token.balanceOf(actors[i]);
+        }
+        uint256 held = token.balanceOf(address(checkout));
+        uint256 opBalance = token.balanceOf(operator);
+        uint256 sent;
+        vm.prank(operator);
+        if (batch) {
+            address[] memory owners = new address[](2);
+            owners[0] = owner;
+            owners[1] = owner; // a duplicate must not pay twice
+            sent = checkout.payoutBatch(owners);
+        } else {
+            sent = checkout.payout(owner);
+        }
+        if (sent != owed || checkout.claimable(owner) != 0) ghostPayoutMisdirected = true;
+        if (token.balanceOf(address(checkout)) != held - owed || token.balanceOf(operator) != opBalance) {
+            ghostPayoutMisdirected = true;
+        }
+        for (uint256 i = 0; i < actors.length; ++i) {
+            uint256 expected = actors[i] == owner ? balances[i] + owed : balances[i];
+            if (token.balanceOf(actors[i]) != expected) ghostPayoutMisdirected = true;
+        }
+        if (owed > 0) ghostPayouts++;
+    }
+
+    /// A stranger tries to push a payout: must always fail.
+    function strangerPayout(uint256 who) external {
+        who = bound(who, 0, actors.length - 1);
+        try checkout.payout(actors[who]) {
+            ghostAccessBroken = true;
+        } catch {}
+    }
+
+    function setJoinFee(uint128 fee) external {
+        vm.prank(operator);
+        checkout.setJoinFee(qid, uint128(bound(fee, 0, 1_000_000)));
     }
 
     /// A stranger tries to relay a valid join: must always fail.
@@ -296,9 +364,19 @@ contract X429CheckoutInvariantTest is Test {
         assertFalse(handler.ghostOvercharged());
     }
 
-    /// Only the operator relays joins (and, tested elsewhere, skips and serves).
+    /// Only the operator relays joins and pushes payouts (and, tested elsewhere, skips and serves).
     function invariant_onlyOperatorRelaysJoins() public view {
         assertFalse(handler.ghostAccessBroken());
+    }
+
+    /// A payout only ever sends an owner exactly its own claimable, from the contract, to the owner.
+    function invariant_payoutOnlyGoesToTheOwner() public view {
+        assertFalse(handler.ghostPayoutMisdirected());
+    }
+
+    /// A paid join charges exactly the join fee and refunds the rest.
+    function invariant_paidJoinChargesTheJoinFee() public view {
+        assertFalse(handler.ghostJoinOvercharged());
     }
 
     function invariant_earnedEqualsPaidEqualsCompensation() public view {
@@ -350,5 +428,19 @@ contract X429CheckoutInvariantTest is Test {
         assertEq(handler.ghostInFlight(), 0);
         assertEq(token.balanceOf(address(checkout)), checkout.totalClaimable() + checkout.totalFees());
         assertEq(checkout.claimable(handler.actors(0)), 10_000 * 2); // passed twice
+
+        handler.setJoinFee(1_000);
+        handler.joinPaid(6, 5_000, 300);
+        handler.joinPaid(6, 5_000, 300); // already waiting: skipped by the handler
+        handler.payout(0, false);
+        handler.payout(1, true);
+        handler.strangerPayout(2);
+        assertEq(handler.ghostPaidJoins(), 1);
+        assertEq(handler.ghostPayouts(), 2);
+        assertEq(checkout.claimable(handler.actors(0)), 0);
+        assertFalse(handler.ghostPayoutMisdirected());
+        assertFalse(handler.ghostJoinOvercharged());
+        assertFalse(handler.ghostAccessBroken());
+        assertEq(token.balanceOf(address(checkout)), checkout.totalClaimable() + checkout.totalFees());
     }
 }

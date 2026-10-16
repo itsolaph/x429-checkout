@@ -12,6 +12,7 @@ import {X429Checkout} from "../src/X429Checkout.sol";
 ///   USDC                  token address (default: native USDC on Base)
 ///   QUEUE_MAX_LENGTH      default 64
 ///   QUEUE_FEE_BPS         default 0
+///   QUEUE_JOIN_FEE        USDC units a paid (x402) join costs, default 1000 (0.001 USDC), max 1 USDC
 ///   QUEUE_META            free-form JSON describing the service
 ///
 /// Prints X429_CONTRACT=0x… and X429_QUEUE_ID=… for scripts.
@@ -25,6 +26,7 @@ contract Deploy is Script {
         uint32 maxLength = uint32(vm.envOr("QUEUE_MAX_LENGTH", uint256(64)));
         uint16 feeBps = uint16(vm.envOr("QUEUE_FEE_BPS", uint256(0)));
         string memory meta = vm.envOr("QUEUE_META", string('{"name":"x429 checkout"}'));
+        uint128 joinFee = uint128(vm.envOr("QUEUE_JOIN_FEE", uint256(1_000)));
 
         vm.startBroadcast(deployerKey);
         checkout = new X429Checkout(IERC20(usdc), vm.addr(operatorKey));
@@ -32,6 +34,7 @@ contract Deploy is Script {
 
         vm.startBroadcast(operatorKey);
         queueId = checkout.createQueue(maxLength, feeBps, meta);
+        checkout.setJoinFee(queueId, joinFee);
         vm.stopBroadcast();
 
         console.log(string.concat("X429_CONTRACT=", vm.toString(address(checkout))));

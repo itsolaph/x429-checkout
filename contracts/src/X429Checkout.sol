@@ -35,12 +35,14 @@ interface IERC3009 {
 ///         want each time someone passes them. A payer moves from position p to position q by paying
 ///         every ticket in between its own posted price, plus an optional operator fee. Payment is an
 ///         EIP-3009 `transferWithAuthorization` signed by the payer (the x402 `exact` scheme), pulled
-///         into this contract in the same transaction as the queue update. Users never need ETH:
-///         joins are EIP-712 signatures the operator relays, claims are EIP-712 signatures anyone may relay.
+///         into this contract in the same transaction as the queue update. Users never need ETH: a join
+///         is either a small x402 payment (`joinPaid`) or an EIP-712 signature (`joinWithSig`), both
+///         relayed by the operator; compensation is pushed to its owner by the operator (`payout`) or
+///         pulled by the owner (`claim`, `claimWithSig`, which anyone may relay).
 ///
-///         One contract serves one operator (fixed at deploy). Compensation is pull based (`claimable`).
-///         The operator can create queues, relay joins and skips, serve from the head, set its fee up to
-///         10% and withdraw its own fees. Nothing else.
+///         One contract serves one operator (fixed at deploy). The operator can create queues, relay
+///         joins and skips, serve from the head, set its fee up to 10% and its join fee up to 1 USDC,
+///         withdraw its own fees, and push an owner's own claimable to that owner. Nothing else.
 contract X429Checkout is EIP712, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -114,7 +116,9 @@ contract X429Checkout is EIP712, ReentrancyGuard {
         QueueFull,
         NothingToPass,
         TooManyPasses,
-        CostExceedsPayment
+        CostExceedsPayment,
+        AlreadyWaiting,
+        BelowJoinFee
     }
 
     struct SkipPlan {
@@ -129,6 +133,8 @@ contract X429Checkout is EIP712, ReentrancyGuard {
     uint16 public constant MAX_FEE_BPS = 1000; // 10%
     uint32 public constant MAX_PASSES = 64;
     uint32 public constant MAX_QUEUE_LENGTH = 256;
+    uint128 public constant MAX_JOIN_FEE = 1_000_000; // 1 USDC
+    uint256 public constant MAX_PAYOUT_BATCH = 64;
 
     // keccak256("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
     bytes32 public constant TRANSFER_WITH_AUTHORIZATION_TYPEHASH =
@@ -161,9 +167,15 @@ contract X429Checkout is EIP712, ReentrancyGuard {
     uint256 public totalClaimable;
     /// @notice Sum of `feesAccrued` over all queues.
     uint256 public totalFees;
+    /// @notice USDC a paid join (`joinPaid`) costs in a queue. Goes to the queue's fees (the operator).
+    mapping(uint32 => uint128) public joinFee;
 
     event QueueCreated(uint32 indexed queueId, address indexed operator, uint32 maxLength, uint16 feeBps, string meta);
     event FeeSet(uint32 indexed queueId, uint16 feeBps);
+    event JoinFeeSet(uint32 indexed queueId, uint128 joinFee);
+    event JoinPaid(uint32 indexed queueId, uint64 indexed ticketId, address indexed owner, uint256 fee, uint256 refund);
+    event PaidOut(address indexed owner, uint256 amount);
+    event PayoutFailed(address indexed owner, uint256 amount);
     event Joined(
         uint32 indexed queueId, uint64 indexed ticketId, address indexed owner, uint128 skipPrice, uint32 position
     );
@@ -213,6 +225,8 @@ contract X429Checkout is EIP712, ReentrancyGuard {
     error NothingToPass();
     error TooManyPasses(uint32 passes);
     error CostExceedsPayment(uint256 cost, uint256 value);
+    error JoinFeeNotCovered(uint256 fee, uint256 value);
+    error BatchTooLarge();
     error PaymentAlreadySettled();
     error PaymentNotReceived();
     error InvalidSignature();
@@ -248,6 +262,13 @@ contract X429Checkout is EIP712, ReentrancyGuard {
         if (feeBps > MAX_FEE_BPS) revert InvalidFee();
         q.feeBps = feeBps;
         emit FeeSet(queueId, feeBps);
+    }
+
+    function setJoinFee(uint32 queueId, uint128 fee) external {
+        _operatorQueue(queueId);
+        if (fee > MAX_JOIN_FEE) revert InvalidFee();
+        joinFee[queueId] = fee;
+        emit JoinFeeSet(queueId, fee);
     }
 
     function withdrawFees(uint32 queueId, address to) external nonReentrant returns (uint256 amount) {
@@ -335,6 +356,60 @@ contract X429Checkout is EIP712, ReentrancyGuard {
         refund = auth.value - cost;
         emit Skipped(queueId, ticketId, auth.from, p.fromPosition, targetPosition, p.compensation, p.fee, refund);
         _push(auth.from, refund);
+    }
+
+    /// @notice Settle an x402 `exact` payment as a join: the payer (`auth.from`) gets a waiting ticket at
+    ///         the tail with `skipPrice`. The queue's `joinFee` goes to the operator's fees; the rest of
+    ///         `auth.value` is refunded in the same transaction. Front-run payments are applied, or refunded
+    ///         in full when the join is no longer possible (already waiting, queue full, value too low).
+    ///         Operator only, for the same reason as `skip`.
+    function joinPaid(uint32 queueId, uint128 skipPrice, Authorization calldata auth)
+        external
+        nonReentrant
+        returns (uint64 ticketId, uint256 fee, uint256 refund)
+    {
+        Queue storage q = _operatorQueue(queueId);
+        if (paymentSettled[auth.from][auth.nonce]) revert PaymentAlreadySettled();
+        paymentSettled[auth.from][auth.nonce] = true;
+
+        SkipPlan memory p;
+        fee = joinFee[queueId];
+        p.fee = fee;
+        if (activeTicket[queueId][auth.from] != 0) p.reason = RefundReason.AlreadyWaiting;
+        else if (q.length >= q.maxLength) p.reason = RefundReason.QueueFull;
+        else if (auth.value < fee) p.reason = RefundReason.BelowJoinFee;
+        _collect(auth, p);
+
+        if (p.reason != RefundReason.None) {
+            emit PaymentRefunded(auth.from, auth.nonce, auth.value, p.reason);
+            _push(auth.from, auth.value);
+            return (0, 0, auth.value);
+        }
+
+        ticketId = _join(queueId, auth.from, skipPrice);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        q.feesAccrued += uint128(fee);
+        totalFees += fee;
+        refund = auth.value - fee;
+        emit JoinPaid(queueId, ticketId, auth.from, fee, refund);
+        _push(auth.from, refund);
+    }
+
+    /// @notice Push `owner`'s claimable USDC to `owner` (operator only). The operator chooses when, never
+    ///         where: the money can only go to its owner. If USDC refuses the transfer (e.g. a blocklisted
+    ///         owner), the balance stays claimable. Returns the amount sent (0 if nothing was owed).
+    function payout(address owner) external nonReentrant returns (uint256) {
+        if (msg.sender != operator) revert NotOperator();
+        return _payout(owner);
+    }
+
+    /// @notice `payout` for up to `MAX_PAYOUT_BATCH` owners in one transaction (e.g. everyone a skip passed).
+    function payoutBatch(address[] calldata owners) external nonReentrant returns (uint256 total) {
+        if (msg.sender != operator) revert NotOperator();
+        if (owners.length > MAX_PAYOUT_BATCH) revert BatchTooLarge();
+        for (uint256 i = 0; i < owners.length; ++i) {
+            total += _payout(owners[i]);
+        }
     }
 
     // ------------------------------------------------------------------ clients
@@ -511,6 +586,8 @@ contract X429Checkout is EIP712, ReentrancyGuard {
             if (p.reason == RefundReason.CostExceedsPayment) {
                 revert CostExceedsPayment(p.compensation + p.fee, auth.value);
             }
+            if (p.reason == RefundReason.AlreadyWaiting) revert AlreadyWaiting();
+            if (p.reason == RefundReason.BelowJoinFee) revert JoinFeeNotCovered(p.fee, auth.value);
             IERC3009(address(usdc))
                 .transferWithAuthorization(
                     auth.from,
@@ -607,6 +684,22 @@ contract X429Checkout is EIP712, ReentrancyGuard {
         totalClaimable -= amount;
         emit Claimed(owner, recipient, amount);
         usdc.safeTransfer(recipient, amount);
+    }
+
+    function _payout(address owner) private returns (uint256 amount) {
+        amount = claimable[owner];
+        if (amount == 0) return 0;
+        claimable[owner] = 0;
+        totalClaimable -= amount;
+        (bool ok, bytes memory ret) = address(usdc).call(abi.encodeCall(IERC20.transfer, (owner, amount)));
+        if (ok && (ret.length == 0 || abi.decode(ret, (bool)))) {
+            emit PaidOut(owner, amount);
+            return amount;
+        }
+        claimable[owner] = amount;
+        totalClaimable += amount;
+        emit PayoutFailed(owner, amount);
+        return 0;
     }
 
     /// @dev Sends USDC to `to`; if the token refuses (e.g. a blocklisted address), credits it to `claimable`.
