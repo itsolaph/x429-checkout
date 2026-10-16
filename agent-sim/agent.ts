@@ -1,7 +1,8 @@
 // A PayBox-style agent for local testing. It signs with a local test key exactly the payloads a
-// PayBox wallet produces: EIP-3009 TransferWithAuthorization for x402 `exact`, EIP-712 Join/Claim
-// for gasless queue actions, and an EIP-191 message to redeem a served ticket. It never sends a
-// transaction itself and never holds ETH.
+// PayBox wallet produces: EIP-3009 TransferWithAuthorization for x402 `exact` (and, for the legacy
+// paths, EIP-712 Join/Claim and an EIP-191 redeem message). `executeX402` plays PayBox for a plugin's
+// x402 proposal: fetch the live 402, check asset and amount against the proposal, pay, retry. It never
+// sends a transaction itself and never holds ETH.
 import { randomBytes } from "node:crypto";
 import { type Address, type Hex, type LocalAccount } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -57,12 +58,40 @@ export class SimAgent {
     return { status: res.status, body: parsed as T, headers: res.headers };
   }
 
-  /** Gasless join: fetch typed data, sign it (PayBox: request_wallet_sign op typedData), relay it. */
-  async join(skipPrice: bigint) {
+  /** Legacy gasless join: fetch typed data, sign it (EIP-712), the operator relays it. */
+  async joinSigned(skipPrice: bigint) {
     const td = await this.http("GET", `/join/typed-data?owner=${this.address}&skipPrice=${skipPrice}`);
     if (td.status !== 200) throw new Error(`${this.name} join typed-data: ${td.status} ${JSON.stringify(td.body)}`);
     const signature = await this.account.signTypedData(td.body.typedData);
-    return this.http("POST", "/join", { ...td.body.submit, signature });
+    return this.http("POST", "/join/signed", { ...td.body.submit, signature });
+  }
+
+  /** Paid join: x402 `POST /join {skipPrice}`. */
+  join(skipPrice: bigint, version: 1 | 2 = 1) {
+    return this.pay("/join", { body: { skipPrice: skipPrice.toString() }, version });
+  }
+
+  /**
+   * Plays PayBox for an x402 proposal returned by a plugin tool: checks the envelope, fetches the live
+   * 402 (`route` maps the public https origin to the local server), refuses if the asset differs or the
+   * amount exceeds `payment.maxAmount`, signs EIP-3009 for the advertised amount and retries.
+   */
+  async executeX402(proposal: any, route: (url: string) => string, version: 1 | 2 = 2) {
+    if (proposal?.kind !== "x402" || proposal.chain !== "eip155:8453") throw new Error(`not a Base x402 proposal: ${JSON.stringify(proposal)}`);
+    const expires = Date.parse(proposal.expiresAt);
+    if (!(expires > Date.now() && expires <= Date.now() + 300_000)) throw new Error(`proposal expiry out of range: ${proposal.expiresAt}`);
+    const { url, method, body } = proposal.request;
+    if (!String(url).startsWith("https://")) throw new Error(`proposal url must be https: ${url}`);
+    const local = route(url);
+    const pr = await this.paymentRequired(local, method, body);
+    const req = version === 2 ? pr.v2.accepts[0] : pr.v1;
+    const amount = BigInt(version === 2 ? req.amount : req.maxAmountRequired);
+    if (req.asset.toLowerCase() !== String(proposal.payment.asset).toLowerCase()) throw new Error(`402 asset ${req.asset} differs from the proposal`);
+    if (amount > BigInt(proposal.payment.maxAmount)) throw new Error(`402 asks ${amount}, above the proposal maximum ${proposal.payment.maxAmount}`);
+    const payload = await this.signExact({ asset: req.asset, payTo: req.payTo, amount, maxTimeoutSeconds: req.maxTimeoutSeconds });
+    const headers = version === 2 ? this.v2Header(payload, req, pr.v2.resource) : this.v1Header(payload);
+    const result = await this.http(method, local, body, headers);
+    return { pr, amount, payload, headers, result };
   }
 
   /** Gasless claim to `recipient` (default self). Returns the signed body too, so tests can replay it. */
@@ -75,8 +104,8 @@ export class SimAgent {
   }
 
   /** Requests a protected resource without payment and parses the 402 (v1 body + v2 header). */
-  async paymentRequired(path: string, method = "POST"): Promise<PaymentRequired> {
-    const r = await this.http(method, path);
+  async paymentRequired(path: string, method = "POST", body?: unknown): Promise<PaymentRequired> {
+    const r = await this.http(method, path, body);
     if (r.status !== 402) throw new Error(`${this.name}: expected 402 from ${path}, got ${r.status} ${JSON.stringify(r.body)}`);
     const v2raw = r.headers.get("payment-required");
     return { status: r.status, body: r.body, v1: r.body.accepts[0], v2: v2raw ? decodeHeader(v2raw) : undefined, headers: r.headers };
@@ -112,17 +141,19 @@ export class SimAgent {
     return { "payment-signature": buildPaymentHeader(2, this.chainId, payload, accepted, resource) };
   }
 
-  /** The whole x402 round trip with v1: 402 → sign → pay. */
-  async pay(path: string, opts: { value?: bigint } = {}) {
-    const pr = await this.paymentRequired(path);
+  /** The whole x402 round trip: 402 → sign → pay (v1 X-PAYMENT by default, or v2). */
+  async pay(path: string, opts: { value?: bigint; body?: unknown; version?: 1 | 2 } = {}) {
+    const pr = await this.paymentRequired(path, "POST", opts.body);
+    const v2 = opts.version === 2;
+    const req = v2 ? pr.v2.accepts[0] : pr.v1;
     const payload = await this.signExact({
-      asset: pr.v1.asset,
-      payTo: pr.v1.payTo,
-      amount: BigInt(pr.v1.maxAmountRequired),
-      maxTimeoutSeconds: pr.v1.maxTimeoutSeconds,
+      asset: req.asset,
+      payTo: req.payTo,
+      amount: BigInt(v2 ? req.amount : req.maxAmountRequired),
+      maxTimeoutSeconds: req.maxTimeoutSeconds,
     }, { value: opts.value });
-    const headers = this.v1Header(payload);
-    const result = await this.http("POST", path, undefined, headers);
+    const headers = v2 ? this.v2Header(payload, req, pr.v2.resource) : this.v1Header(payload);
+    const result = await this.http("POST", path, opts.body, headers);
     return { pr, payload, headers, result };
   }
 

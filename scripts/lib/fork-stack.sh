@@ -1,12 +1,12 @@
 # Shared setup for scripts/e2e-local.sh and scripts/mcp-smoke.sh (source it, do not run it).
 #
 #   anvil --fork-url <Base RPC> --fork-block-number <pinned> → keys from anvil's public mnemonic →
-#   deploy X429Checkout → fund paying agents with forked USDC (minted through a minter configured by
-#   USDC's real masterMinter) → build the dashboard → start the server against the fork.
+#   deploy X429Checkout (join fee 0.001 USDC) → fund the agents with forked USDC (minted through a minter
+#   configured by USDC's real masterMinter) → build the dashboard → start the server against the fork.
 #
 # Nothing is sent to a public network: the public RPC is only read by anvil to build the fork.
 #
-# Caller sets: WORK (work dir), TAG (log prefix), FEE_BPS, SERVICE_INTERVAL_MS, MIN_QUEUE_MS.
+# Caller sets: WORK (work dir), TAG (log prefix), FEE_BPS, SERVICE_INTERVAL_MS, MIN_QUEUE_MS, JOIN_FEE (units).
 # Env: E2E_RPC_URL (fork source), E2E_FORK_BLOCK (pinned block, default 52621900), E2E_KEEP=1.
 # Exports: RPC, API, CONTRACT, QUEUE_ID, DEPLOY_BLOCK, USDC, AGENT_KEYS[], WATCHER_KEY, PIDS[].
 
@@ -113,13 +113,13 @@ start_stack() {
   # 4. deploy
   local out
   out="$(DEPLOYER_PRIVATE_KEY="$DEPLOYER_KEY" OPERATOR_PRIVATE_KEY="$OPERATOR_KEY" USDC="$USDC" \
-    QUEUE_FEE_BPS="$FEE_BPS" QUEUE_MAX_LENGTH=64 QUEUE_META='{"name":"x429 forecast API","path":"/v1/forecast"}' \
+    QUEUE_FEE_BPS="$FEE_BPS" QUEUE_JOIN_FEE="${JOIN_FEE:-1000}" QUEUE_MAX_LENGTH=64 QUEUE_META='{"name":"x429 forecast API","path":"/v1/forecast"}' \
     forge script contracts/script/Deploy.s.sol:Deploy --root contracts --rpc-url "$RPC" --broadcast 2>&1)" \
     || { echo "$out"; die "deploy failed"; }
   CONTRACT="$(grep -oE 'X429_CONTRACT=0x[0-9a-fA-F]{40}' <<<"$out" | head -n1 | cut -d= -f2)"
   QUEUE_ID="$(grep -oE 'X429_QUEUE_ID=[0-9]+' <<<"$out" | head -n1 | cut -d= -f2)"
   [ -n "$CONTRACT" ] && [ -n "$QUEUE_ID" ] || { echo "$out"; die "could not parse the deploy output"; }
-  log "deployed X429Checkout at $CONTRACT, queue $QUEUE_ID, fee ${FEE_BPS} bps, operator $OPERATOR"
+  log "deployed X429Checkout at $CONTRACT, queue $QUEUE_ID, fee ${FEE_BPS} bps, join fee ${JOIN_FEE:-1000} units, operator $OPERATOR"
 
   # 5. fund the paying agents (indices 6..10) with forked USDC
   local master
@@ -131,9 +131,12 @@ start_stack() {
   for i in 6 7 8 9 10; do
     cast send --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" "$USDC" 'mint(address,uint256)' "$(addr "${AGENT_KEYS[$i]}")" 5000000 >/dev/null
   done
-  # rival-1 also gets 1 USDC, to pay for a move with a ticket it already holds
+  # the demo rivals get 0.1 USDC each for their paid join; rival-1 1 USDC more, to pay for a move
+  for i in 0 1 2 3 4 5; do
+    cast send --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" "$USDC" 'mint(address,uint256)' "$(addr "${AGENT_KEYS[$i]}")" 100000 >/dev/null
+  done
   cast send --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" "$USDC" 'mint(address,uint256)' "$(addr "${AGENT_KEYS[0]}")" 1000000 >/dev/null
-  log "minted forked USDC through a minter set by USDC's masterMinter ($master): 5 USDC to each of 5 paying agents, 1 USDC to rival-1"
+  log "minted forked USDC through a minter set by USDC's masterMinter ($master): 5 USDC to each of 5 paying agents, 0.1 USDC to each demo rival (+1 USDC to rival-1)"
 
   # 6. dashboard + server
   node web/build.mjs >"$WORK/web.log" 2>&1 || { cat "$WORK/web.log"; die "dashboard build failed"; }
@@ -143,7 +146,7 @@ start_stack() {
   X429_RPC_URL="$RPC" X429_CHAIN_ID=8453 X429_CONTRACT="$CONTRACT" X429_QUEUE_ID="$QUEUE_ID" \
   X429_OPERATOR_KEY_FILE="$WORK/operator.key" X429_PORT="$port" X429_PUBLIC_URL="$API" \
   X429_SERVICE_INTERVAL_MS="$SERVICE_INTERVAL_MS" X429_MIN_QUEUE_MS="$MIN_QUEUE_MS" X429_POLL_MS=500 \
-  X429_DEPLOY_BLOCK="$DEPLOY_BLOCK" X429_SITE_DIR="$ROOT/site" \
+  X429_DEPLOY_BLOCK="$DEPLOY_BLOCK" X429_SITE_DIR="$ROOT/site" X429_DATA_DIR="$WORK/data" X429_PAYOUT_INTERVAL_MS=1000 \
     node server/src/main.ts >"$WORK/server.log" 2>&1 &
   PIDS+=("$!")
   for _ in $(seq 1 80); do

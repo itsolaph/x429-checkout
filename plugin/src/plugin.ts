@@ -437,7 +437,8 @@ function createServer() {
     {
       title: "Earnings of an address",
       description:
-        "Public read: how much USDC an address earned for being passed in the x429 queue, how much already reached its wallet (sent automatically by the operator) and what is still pending. No payment.",
+        "Public read: how much USDC an address earned for being passed in the x429 queue, how much already reached its wallet (sent automatically by the operator) and what is still pending. No payment and nothing to claim. " +
+        "Next: x429_status to see the queue, or keep waiting with x429_use.",
       inputSchema: z.object({ address }).strict(),
       outputSchema: earningsOutput,
       annotations: READ,
