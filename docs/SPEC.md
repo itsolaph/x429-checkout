@@ -53,6 +53,25 @@ ceiling, `quoteExpiresAt`), `GET /queue` (positions, posted prices, cost to reac
 are applied or refunded in full exactly like front-run skips (§4.5). Descriptor `version` is "0.3"
 and gains `use`, `payouts` and `gaslessJoin` (the v0.2 join, now `POST /join/signed`).
 
+**Served in the paid request.** When a paid skip settles with the payer at #1 and the service slot
+is free, the server serves that ticket right away (no admission round: the round exists so a fresh
+head can still be outbid, and a payer who paid every passed ticket its own posted price has settled
+that) and the 200 carries `status: "served"`, `result` (the API answer) and `receipt` (passed
+tickets with short address, demo label and amount; `paidToWaiting`, `operatorFee`, `refund`,
+`settlement {txHash, explorerUrl}`, `waitSavedSeconds` = places × service interval, `newPosition`,
+`headline`). The payer's transfer is included before the answer; the operator's serve transaction
+confirms in the background (`X429_SERVE_CONFIRM=1` waits for it). Otherwise `status: "queued"` with
+position, ETA and the token; a queued paid #1 also skips the admission round. A retry of a paid
+request with the same EIP-3009 nonce gets the identical response (cached in memory until the
+authorization expires; after a restart, the fresh-token replay above), with
+`X-429-Idempotent-Replay: true`.
+
+**The 429 offer.** The busy API's 429 body is `{error, message, position, queueLength, etaSeconds,
+you, skip: {targetPosition: 1, passes, cost, maxAmount, waitSavedSeconds, method, url, body,
+plugin: {tool: "x429_skip"}}, wait, next, descriptor}` with `Retry-After`, `X-429-Position`,
+`X-429-Skip-Cost`, `X-429-Skip-Url` and `Link: <…/skip>; rel="payment"`. With `X-429-Token`, `you` is
+your ticket and the price starts from your position. The full descriptor moved to `GET /x429`.
+
 ---
 
 # v0.2 (unchanged, still supported)
