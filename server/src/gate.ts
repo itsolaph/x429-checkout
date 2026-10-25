@@ -4,10 +4,13 @@
 // queue is empty and the service is idle; otherwise it gets 429 with an x429 descriptor that prices a
 // skip. A served ticket redeems one request, either with the redeem token from its paid join/skip
 // (`POST /use`, the PayBox plugin path) or with an EIP-191 signature of its owner (headers).
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
+import { join } from "node:path";
 import { parseEventLogs, verifyMessage, type Address, type Hash, type Hex } from "viem";
 import { checkoutAbi } from "./abi.ts";
 import type { Checkout, Log } from "./checkout.ts";
+import { toJson } from "./json.ts";
 import { PROTOCOL_VERSION, SIGNATURE_HEADER, TICKET_HEADER, caip2, fmtUsd, ticketMessage } from "./protocol.ts";
 import { isQuoteError, quoteSkip, type Quote, type Snapshot } from "./queue.ts";
 
@@ -52,6 +55,8 @@ const SIG_RE = /^0x[0-9a-fA-F]{130}$/;
 export class Gate {
   private busyUntil = 0;
   private serving = false;
+  /** An operator tick is waiting for (or holding) the relayer. */
+  private ticking = false;
   private lastServeAt = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly admissions = new Map<bigint, Admission>();
@@ -63,9 +68,65 @@ export class Gate {
   private readonly checkout: Checkout;
   private readonly log: Log;
 
+  /** Where admissions survive a restart (a paid ticket served onchain must still redeem its request). */
+  private readonly file: string | undefined;
+
   constructor(checkout: Checkout, log: Log) {
     this.checkout = checkout;
     this.log = log;
+    const dir = checkout.cfg.dataDir;
+    if (!dir) return;
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    this.file = join(dir, `admissions-${checkout.cfg.contract.toLowerCase()}.json`);
+    this.load();
+  }
+
+  private load(): void {
+    let raw: { version: 1; admissions: Record<string, unknown>[]; consumed: string[] } | undefined;
+    try {
+      raw = JSON.parse(readFileSync(this.file!, "utf8"));
+    } catch {
+      return; // first start
+    }
+    if (!raw || raw.version !== 1) return;
+    const now = Date.now();
+    for (const a of raw.admissions ?? []) {
+      const adm: Admission = {
+        ticketId: BigInt(a.ticketId as string),
+        owner: a.owner as Address,
+        servedAt: Number(a.servedAt),
+        expiresAt: Number(a.expiresAt),
+        servedTx: a.servedTx as Hash,
+        waited: Number(a.waited),
+        timesPassed: Number(a.timesPassed),
+        earned: BigInt(a.earned as string),
+        paid: BigInt(a.paid as string),
+        ...(a.hasResult ? { result: a.result } : {}),
+      };
+      if (adm.expiresAt >= now) this.admissions.set(adm.ticketId, adm);
+      else this.consumed.add(adm.ticketId);
+    }
+    for (const id of raw.consumed ?? []) this.consumed.add(BigInt(id));
+    this.log({ evt: "admissions_loaded", admissions: this.admissions.size, consumed: this.consumed.size });
+  }
+
+  private save(): void {
+    if (!this.file) return;
+    try {
+      const admissions = [...this.admissions.values()].map((a) => ({
+        ...a,
+        ticketId: a.ticketId.toString(),
+        earned: a.earned.toString(),
+        paid: a.paid.toString(),
+        hasResult: a.result !== undefined,
+      }));
+      const consumed = [...this.consumed].slice(-5_000).map(String);
+      const tmp = `${this.file}.tmp`;
+      writeFileSync(tmp, toJson({ version: 1, admissions, consumed }), { mode: 0o600 });
+      renameSync(tmp, this.file);
+    } catch (err) {
+      this.log({ evt: "admissions_save_error", error: String((err as Error)?.message ?? err) });
+    }
   }
 
   private get cfg() {
@@ -149,11 +210,13 @@ export class Gate {
         message: ticketMessage(cfg.chainId, cfg.contract, "<ticketId>"),
         scheme: "EIP-191 personal_sign by the ticket owner (alternative to the token)",
       },
-      gaslessJoin: {
-        method: "POST",
-        url: `${cfg.publicUrl}/join/signed`,
-        typedData: `${cfg.publicUrl}/join/typed-data?owner=<address>&skipPrice=<units>`,
-      },
+      gaslessJoin: cfg.legacyJoin
+        ? {
+            method: "POST",
+            url: `${cfg.publicUrl}/join/signed`,
+            typedData: `${cfg.publicUrl}/join/typed-data?owner=<address>&skipPrice=<units>`,
+          }
+        : null,
       payouts: cfg.autoPayout ? "automatic: whoever passes you pays you, and the operator sends it to your wallet" : "claim",
       mcp: `${cfg.publicUrl}/mcp`,
     };
@@ -264,13 +327,16 @@ export class Gate {
 
   private sweep(): void {
     const now = Date.now();
+    let changed = false;
     for (const [id, a] of this.admissions) {
       if (a.expiresAt < now) {
         this.admissions.delete(id);
         this.remember(id);
+        changed = true;
         this.log({ evt: "admission_expired", ticketId: id, owner: a.owner });
       }
     }
+    if (changed) this.save();
   }
 
   private remember(id: bigint): void {
@@ -294,6 +360,7 @@ export class Gate {
       if (!this.admissions.has(id) || this.consumed.has(id)) return this.forbidden("ticket_used_or_expired", id);
       this.admissions.delete(id);
       this.remember(id);
+      this.save();
       this.stats.queued++;
       this.log({ evt: "admit", via: "queue", ticketId: id, owner: adm.owner, waited: adm.waited });
       return { kind: "admit", via: "queue", admission: adm };
@@ -356,6 +423,7 @@ export class Gate {
     const replayed = adm.result !== undefined;
     if (!replayed) {
       adm.result = make(adm);
+      this.save();
       this.stats.queued++;
       this.log({ evt: "admit", via: "token", ticketId: id, owner: adm.owner, waited: adm.waited });
     }
@@ -380,12 +448,16 @@ export class Gate {
       this.paidHeads.add(ticketId);
       if (this.paidHeads.size > 1_000) this.paidHeads.delete(this.paidHeads.values().next().value!);
     }
-    if (this.serving || now < this.busyUntil) {
+    if (this.serving) {
       return { status: "busy", reason: "slot_busy", etaSeconds: Math.max(1, Math.ceil((Math.max(this.busyUntil, now + 1000) - now) / 1000)) };
     }
     if (!head || head.id !== ticketId) return { status: "busy", reason: "not_head", etaSeconds: this.etaSeconds(1, snap) };
+    // A paid #1 takes the slot even inside the current service interval: it already paid every ticket
+    // it passed, so making it wait out someone else's interval sells a place without the service.
+    // The next scheduled serve moves back one interval, so the API still sees one extra request at most.
+    const preempted = now < this.busyUntil;
     this.serving = true;
-    this.busyUntil = now + this.cfg.serviceIntervalMs;
+    this.busyUntil = Math.max(this.busyUntil, now) + this.cfg.serviceIntervalMs;
     const done = (ok: boolean) => {
       this.serving = false;
       this.lastServeAt = Date.now();
@@ -410,6 +482,20 @@ export class Gate {
         adm.servedTx = receipt.transactionHash;
         serveConfirmed = true;
         done(true);
+        // serve(queue, 1) serves whoever is head onchain: make sure that was this ticket
+        const servedIds = parseEventLogs({ abi: checkoutAbi, logs: receipt.logs, eventName: "Served" }).map((e) => e.args);
+        const mine = servedIds.find((a) => a.ticketId === ticketId);
+        if (!mine) {
+          for (const a of servedIds) {
+            this.admissions.set(a.ticketId, {
+              ticketId: a.ticketId, owner: a.owner, servedAt: Date.now(), expiresAt: Date.now() + this.cfg.admissionTtlMs,
+              servedTx: receipt.transactionHash, waited: Number(a.waited), timesPassed: Number(a.timesPassed), earned: a.earned, paid: a.paid,
+            });
+          }
+          this.save();
+          this.log({ evt: "serve_mismatch", via: "paid_skip", ticketId, served: servedIds.map((a) => a.ticketId), tx: receipt.transactionHash });
+          return { status: "busy", reason: "not_head", etaSeconds: this.etaSeconds(1, this.checkout.reader.latest) };
+        }
       } else {
         const sent = await relayer.send("serve", [this.cfg.queueId, 1], "serve (paid skip)");
         adm.servedTx = sent.hash;
@@ -427,10 +513,11 @@ export class Gate {
       }
       adm.result = make(adm);
       this.admissions.set(ticketId, adm);
+      this.save();
       this.stats.served++;
       this.stats.queued++;
       this.stats.servedInRequest++;
-      this.log({ evt: "admit", via: "paid_skip", ticketId, owner: adm.owner, serveTx: adm.servedTx, confirmed: serveConfirmed });
+      this.log({ evt: "admit", via: "paid_skip", ticketId, owner: adm.owner, serveTx: adm.servedTx, confirmed: serveConfirmed, preempted });
       return { status: "served", admission: adm, result: adm.result, serveTx: adm.servedTx, serveConfirmed };
     } catch (err) {
       this.stats.serveErrors++;
@@ -443,7 +530,7 @@ export class Gate {
   /** Serves the head when the service is free and the head's admission round is over. */
   async operatorTick(): Promise<void> {
     const relayer = this.checkout.relayer;
-    if (!relayer || this.serving) return;
+    if (!relayer || this.serving || this.ticking) return;
     this.sweep();
     let snap: Snapshot;
     try {
@@ -458,9 +545,16 @@ export class Gate {
     // a queue of demo agents only is kept waiting: serving it would only make them pay to rejoin
     if (this.cfg.holdDemoOnly && this.cfg.demoAgents.size > 0 && snap.tickets.every((t) => this.cfg.demoAgents.has(t.owner.toLowerCase()))) return;
     if (!this.paidHeads.has(head.id) && now < head.firstSeenMs + this.cfg.minQueueMs) return; // admission round still open
-    this.serving = true;
+    this.ticking = true;
     try {
-      const receipt = await relayer.exclusive(() => relayer.call("serve", [this.cfg.queueId, 1], "serve"));
+      // `serving` is set only once the relayer is ours: while a paid skip settles, it must still be
+      // able to serve its own ticket at once (it checks `serving`), and this tick then stands down.
+      const receipt = await relayer.exclusive(async () => {
+        if (Date.now() < this.busyUntil) return undefined;
+        this.serving = true;
+        return relayer.call("serve", [this.cfg.queueId, 1], "serve");
+      });
+      if (!receipt) return;
       const servedAt = Date.now();
       this.lastServeAt = servedAt;
       for (const ev of parseEventLogs({ abi: checkoutAbi, logs: receipt.logs, eventName: "Served" })) {
@@ -482,6 +576,7 @@ export class Gate {
         this.busyUntil = servedAt + this.cfg.serviceIntervalMs;
         this.log({ evt: "served", ticketId: a.ticketId, owner: a.owner, timesPassed: a.timesPassed, earned: a.earned, paid: a.paid, tx: receipt.transactionHash, gasUsed: receipt.gasUsed });
       }
+      this.save();
     } catch (err) {
       this.stats.serveErrors++;
       this.lastServeAt = Date.now();
@@ -489,6 +584,7 @@ export class Gate {
       this.log({ evt: "serve_error", error: String((err as Error)?.message ?? err).split("\n")[0] });
     } finally {
       this.serving = false;
+      this.ticking = false;
       void this.checkout.reader.refresh().catch(() => {});
     }
   }

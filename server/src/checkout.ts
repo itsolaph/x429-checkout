@@ -90,7 +90,7 @@ export type JoinResult = {
 };
 
 /** A retried paid request that was already settled: same ticket, fresh token, nothing charged. */
-export type ReplayResult = { replayed: true; ticketId: bigint; owner: Address; position: number; token: string };
+export type ReplayResult = { replayed: true; ticketId: bigint; owner: Address; position: number };
 
 type Fail = (status: number, reason: string, message: string, details?: Record<string, unknown>) => CheckoutError;
 
@@ -243,7 +243,10 @@ export class Checkout {
   async joinTypedData(owner: Address, skipPrice?: bigint) {
     const nonce = randomNonce();
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
-    const price = skipPrice ?? this.cfg.suggestedSkipPrice;
+    if (!this.cfg.legacyJoin) {
+      throw new CheckoutError(410, "legacy_join_disabled", "the gasless join is closed; join with x402 (POST /join or the x429_join plugin tool)");
+    }
+    const price = this.skipPriceFrom(skipPrice);
     return {
       typedData: joinTypedData({
         chainId: this.cfg.chainId,
@@ -266,9 +269,12 @@ export class Checkout {
     input: { owner: string; skipPrice: string | bigint; nonce: string; deadline: string | bigint; signature: string },
     client = "local",
   ) {
+    if (!this.cfg.legacyJoin) {
+      throw new CheckoutError(410, "legacy_join_disabled", "the gasless join is closed; join with x402 (POST /join or the x429_join plugin tool)");
+    }
     const relayer = this.requireRelayer();
     const owner = parseAddress(input.owner, "owner");
-    const skipPrice = parseUint(input.skipPrice, "skipPrice");
+    const skipPrice = this.skipPriceFrom(parseUint(input.skipPrice, "skipPrice"));
     const deadline = parseUint(input.deadline, "deadline");
     const nonce = parseBytes32(input.nonce, "nonce");
     const signature = parseSignatureHex(input.signature);
@@ -574,7 +580,9 @@ export class Checkout {
     const snap = await this.reader.get(0);
     const row = snap.tickets.find((t) => t.id === ticketId);
     this.log({ evt: "paid_request_retried", payer, ticketId });
-    return { replayed: true, ticketId, owner: payer, position: row?.position ?? 0, token: this.tokens.issue(ticketId, payer) };
+    // no fresh token: once the settlement is mined the authorization (signature included) is public
+    // calldata, so a retry proves nothing about who sends it. The original response carried the token.
+    return { replayed: true, ticketId, owner: payer, position: row?.position ?? 0 };
   }
 
   /**

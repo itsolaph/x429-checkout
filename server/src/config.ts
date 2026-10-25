@@ -40,6 +40,8 @@ export type Config = {
   serveConfirm: boolean;
   /** Do not serve while every waiting ticket is a demo agent's (nobody real waits, nothing to spend). */
   holdDemoOnly: boolean;
+  /** Keep the v0.2 gasless join (`/join/signed`, MCP x429_join) open. Off by default: the operator pays its gas. */
+  legacyJoin: boolean;
   /** "open-meteo" (cached real data, demo fallback) or "demo". */
   forecastSource: string;
   /** Relayed joins per minute per client IP (each costs the operator gas). */
@@ -104,8 +106,9 @@ export function loadConfig(): Config {
     dataDir: process.env.X429_DATA_DIR || undefined,
     autoPayout: env("X429_AUTO_PAYOUT", "1") !== "0",
     payoutIntervalMs: int("X429_PAYOUT_INTERVAL_MS", 3_000),
-    serveConfirm: env("X429_SERVE_CONFIRM", "0") === "1",
+    serveConfirm: env("X429_SERVE_CONFIRM", "1") === "1",
     holdDemoOnly: env("X429_HOLD_DEMO_ONLY", "1") !== "0",
+    legacyJoin: env("X429_LEGACY_JOIN", "0") === "1",
     forecastSource: env("X429_FORECAST_SOURCE", "open-meteo"),
     demoAgents: new Set(
       env("X429_DEMO_AGENTS", "")

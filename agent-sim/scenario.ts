@@ -382,6 +382,25 @@ async function main() {
     eq(await usdcOf(skipper.address), before, "no money moved");
   });
 
+  await step("the same payment replayed by another client (its calldata is public once mined) gets no token and no result", async () => {
+    const before = await usdcOf(skipper.address);
+    const r = await skipper.http("POST", "/skip", skipBody, { ...skipHeaders, "x-forwarded-for": "198.51.100.7" });
+    eq(r.status, 200, `status (${JSON.stringify(r.body)})`);
+    eq(r.headers.get("x-429-idempotent-replay"), "true", "marked as a replay");
+    eq(r.body.token, undefined, "no redeem token");
+    eq(r.body.result, undefined, "no API result");
+    eq(r.body.replayed, true, "flagged as replayed");
+    eq(await usdcOf(skipper.address), before, "no money moved");
+  });
+
+  await step("the gasless legacy join is closed (operator gas, unbounded skip price)", async () => {
+    const td = await late.http("GET", `/join/typed-data?owner=${late.address}&skipPrice=1000`);
+    eq(td.status, 410, `typed-data status (${JSON.stringify(td.body)})`);
+    eq(td.body.error, "legacy_join_disabled", "reason");
+    const r = await late.http("POST", "/join/signed", { owner: late.address, skipPrice: "1000000000000", nonce: `0x${"11".repeat(32)}`, deadline: "9999999999", signature: `0x${"22".repeat(65)}` });
+    eq(r.status, 410, "signed join status");
+  });
+
   await step("expired authorization (v1, validBefore in the past) is refused before any transaction", async () => {
     const pr = await late.paymentRequired("/skip?queue=1&target=2");
     const block = await client.getBlock();

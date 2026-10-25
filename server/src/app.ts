@@ -129,8 +129,13 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
     };
   }
 
-  type Cached = { status: number; body: unknown; headers: Record<string, string>; expires: number };
-  /** Successful paid responses by payment (kind, payer, EIP-3009 nonce): a retry gets the same bytes. Memory only. */
+  type Cached = { status: number; body: unknown; headers: Record<string, string>; expires: number; client?: string };
+  /**
+   * Successful paid responses by payment (kind, payer, EIP-3009 nonce): a retry from the same client
+   * gets the same bytes. Memory only. The key is public once the settlement is mined (the
+   * authorization is calldata), so a retry from another client gets the receipt without the redeem
+   * token or the API result.
+   */
   const responses = new Map<string, Cached>();
   const inflight = new Map<string, Promise<Cached | undefined>>();
   function sweepResponses() {
@@ -205,10 +210,12 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
     // idempotency on the EIP-3009 nonce: the same payment gets the same response, and is never charged twice
     sweepResponses();
     const key = `${kind}:${payer.toLowerCase()}:${nonce.toLowerCase()}`;
+    const client = clientIp(req);
     const hit = responses.get(key) ?? (await inflight.get(key));
     if (hit) {
-      log({ evt: "paid_request_retried", kind, payer, nonce });
-      return send(res, hit.status, hit.body, { ...hit.headers, "x-429-idempotent-replay": "true" });
+      const same = hit.client === client;
+      log({ evt: "paid_request_retried", kind, payer, nonce, sameClient: same });
+      return send(res, hit.status, same ? hit.body : redacted(hit.body), { ...hit.headers, "x-429-idempotent-replay": "true" });
     }
 
     const run = async (): Promise<Cached> => {
@@ -241,8 +248,8 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
             ...r,
             txHash,
             etaSeconds: r.position ? eta(r.position) : null,
-            message: `This payment was already settled for ticket #${r.ticketId}; nothing was charged again. Here is a fresh token for it.`,
-            next: NEXT_USE,
+            message: `This payment was already settled for ticket #${r.ticketId}; nothing was charged again. Its redeem token and answer went out in the first response to it.`,
+            next: "Use the token from the first paid response (x429_use). Do not pay again for the same request.",
           },
         };
       }
@@ -293,7 +300,7 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
     const p = run();
     inflight.set(key, p.catch(() => undefined));
     try {
-      const c = await p;
+      const c = { ...(await p), client };
       responses.set(key, c);
       send(res, c.status, c.body, c.headers);
     } catch (err) {
@@ -310,6 +317,20 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
     } finally {
       inflight.delete(key);
     }
+  }
+
+  /** A cached paid response without what only its payer may see (token, API result). */
+  function redacted(body: unknown): unknown {
+    if (!body || typeof body !== "object") return body;
+    const { token: _t, result: _r, ...rest } = body as Record<string, unknown>;
+    void _t;
+    void _r;
+    return {
+      ...rest,
+      replayed: true,
+      message: "This payment was already settled and answered; nothing was charged again. The redeem token and the API result went out in the first response.",
+      next: "Use the token from the first paid response (x429_use). Do not pay again for the same request.",
+    };
   }
 
   /** Resolves a redeem token from a request body, or answers 403. */
