@@ -226,7 +226,7 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
           ? await checkout.settleJoin(payment, skipPrice)
           : await checkout.settleSkip(payment, target, skipPrice, async (s) => {
               tSettled = performance.now();
-              if (s.position === 1) served = await gate.serveNow(s.ticketId, (a) => apiResult(city, a), cfg.serveConfirm);
+              if (s.position === 1) served = await gate.serveNow(s.ticketId, (a) => apiResult(city, a), cfg.serveConfirm, { owner: s.owner, paid: s.cost });
             });
       const tDone = performance.now();
       const txHash = r.replayed ? (checkout.tokens.paymentTx(payer, nonce) ?? "") : r.txHash;
@@ -236,7 +236,7 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
         : `total;dur=${(tDone - t0).toFixed(0)}`;
       const headers = { [payment.version === 2 ? V2_RESPONSE_HEADER : V1_RESPONSE_HEADER]: encodeHeader(settlement), "server-timing": timing };
       const expires = Math.max(Date.now() + 600_000, Number(payment.payload.authorization.validBefore) * 1000 + 600_000);
-      log({ evt: "paid_latency", kind, ms: Math.round(tDone - t0), settleMs: tSettled ? Math.round(tSettled - t0) : undefined, served: served?.status });
+      log({ evt: "paid_latency", kind, ms: Math.round(tDone - t0), settleMs: tSettled ? Math.round(tSettled - t0) : undefined, served: served?.status, ...(served?.status === "busy" ? { busyReason: served.reason } : {}) });
       if (r.replayed) {
         return {
           status: 200,

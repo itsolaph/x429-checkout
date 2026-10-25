@@ -439,11 +439,22 @@ export class Gate {
    * and confirmed in the background (it is the operator's own transaction; the payer's transfer is
    * already included).
    */
-  async serveNow(ticketId: bigint, make: (adm: Admission) => unknown, confirm: boolean): Promise<ServeNow> {
+  async serveNow(
+    ticketId: bigint,
+    make: (adm: Admission) => unknown,
+    confirm: boolean,
+    atHead?: { owner: Address; paid: bigint },
+  ): Promise<ServeNow> {
     const relayer = this.checkout.relayer!;
     const now = Date.now();
     const snap = this.checkout.reader.latest;
-    const head = snap?.tickets[0];
+    // `atHead`: the settlement receipt itself says this ticket is #1. The RPC behind the reader can lag
+    // a block behind the one that mined it, so its snapshot may still show the old head; the Served
+    // event check below catches the rare case where the receipt was overtaken.
+    const known = snap?.tickets.find((t) => t.id === ticketId);
+    const head = atHead
+      ? { id: ticketId, owner: atHead.owner, joinedAt: known?.joinedAt ?? (snap?.blockTime ?? 0), timesPassed: known?.timesPassed ?? 0, earned: known?.earned ?? 0n, paid: known ? known.paid + atHead.paid : atHead.paid }
+      : snap?.tickets[0];
     if (head?.id === ticketId) {
       this.paidHeads.add(ticketId);
       if (this.paidHeads.size > 1_000) this.paidHeads.delete(this.paidHeads.values().next().value!);
@@ -496,6 +507,12 @@ export class Gate {
           this.log({ evt: "serve_mismatch", via: "paid_skip", ticketId, served: servedIds.map((a) => a.ticketId), tx: receipt.transactionHash });
           return { status: "busy", reason: "not_head", etaSeconds: this.etaSeconds(1, this.checkout.reader.latest) };
         }
+        // the Served event is the truth for what this ticket earned, paid and waited
+        adm.owner = mine.owner;
+        adm.waited = Number(mine.waited);
+        adm.timesPassed = Number(mine.timesPassed);
+        adm.earned = mine.earned;
+        adm.paid = mine.paid;
       } else {
         const sent = await relayer.send("serve", [this.cfg.queueId, 1], "serve (paid skip)");
         adm.servedTx = sent.hash;
