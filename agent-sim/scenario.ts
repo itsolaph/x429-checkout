@@ -468,6 +468,25 @@ async function main() {
     eq(await usdcOf(pAgent.address), before - BigInt(retry.result.body.cost), "charged exactly the new cost");
   });
 
+  await step("while a skip quote awaits approval, the operator's demo agents do not join (their join would move its price)", async () => {
+    await pAgent.paymentRequired("/skip?queue=1&target=1");
+    const demo = rivals[0]!;
+    const before = await usdcOf(demo.address);
+    const held = await demo.join(1n);
+    eq(held.result.status, 503, `held join status (${JSON.stringify(held.result.body)})`);
+    eq(held.result.body.error, "quote_hold", "reason");
+    check(Number(held.result.headers.get("retry-after")) > 0, "retry-after set");
+    eq(await usdcOf(demo.address), before, "nothing charged");
+    eq(await authUsed(demo.address, held.payload.authorization.nonce), false, "authorization unused");
+
+    const paidSkip = await pAgent.pay("/skip?queue=1&target=1");
+    eq(paidSkip.result.status, 200, `the quoted skip settles (${JSON.stringify(paidSkip.result.body)})`);
+    recordSkip(paidSkip.result.body, "quoted skip");
+    const after = await demo.join(1n);
+    check(after.result.status !== 503, `the hold lifts once the quote is paid (${after.result.status})`);
+    if (after.result.status === 200) recordJoin(demo, after.result.body, 1n, demo.name);
+  });
+
   await step("front-run authorization: submitted straight to USDC, then detected and applied", async () => {
     const pr = await fAgent.paymentRequired("/skip?queue=1&target=2");
     const payload = await fAgent.signExact({ asset: pr.v1.asset, payTo: pr.v1.payTo, amount: BigInt(pr.v1.maxAmountRequired), maxTimeoutSeconds: pr.v1.maxTimeoutSeconds });

@@ -58,6 +58,8 @@ function log(e: Record<string, unknown>) {
 }
 
 let paused: string | undefined;
+/** The server holds demo joins while someone approves a skip quote (503 quote_hold). */
+let holdUntil = 0;
 let running = true;
 
 async function round(): Promise<void> {
@@ -87,11 +89,16 @@ async function round(): Promise<void> {
       return;
     }
     paused = undefined;
+    if (Date.now() < holdUntil) return;
     const { result } = await d.agent.join(d.price, 2);
     if (result.status === 200) {
       budget.record(BigInt(result.body.fee ?? fee));
       d.goneSince = 0;
       log({ evt: "joined", agent: d.agent.name, address: d.agent.address, ticketId: result.body.ticketId, position: result.body.position, skipPrice: d.price, fee: result.body.fee, tx: result.body.txHash });
+    } else if (result.status === 503 && result.body?.error === "quote_hold") {
+      holdUntil = Date.now() + Number(result.body.retryAfterSeconds ?? 30) * 1000;
+      log({ evt: "held", reason: "skip quote awaiting approval", retryInSeconds: result.body.retryAfterSeconds });
+      return;
     } else {
       log({ evt: "join_failed", agent: d.agent.name, status: result.status, error: result.body?.error, message: result.body?.message });
     }

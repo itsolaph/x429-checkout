@@ -1,6 +1,7 @@
 // HTTP routes: the busy API, x402 /join and /skip, /use with a redeem token, quotes, earnings, the legacy
 // gasless EIP-712 join/claim, the feed, MCP and the dashboard.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import type { Address } from "viem";
@@ -134,15 +135,48 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
    * Successful paid responses by payment (kind, payer, EIP-3009 nonce): a retry from the same client
    * gets the same bytes. Memory only. The key is public once the settlement is mined (the
    * authorization is calldata), so a retry from another client gets the receipt without the redeem
-   * token or the API result.
+   * token or the API result. Kept in X429_DATA_DIR (mode 600, next to the token store) so a retry
+   * after a restart still gets its token instead of a redacted receipt.
    */
   const responses = new Map<string, Cached>();
   const inflight = new Map<string, Promise<Cached | undefined>>();
+  const responsesFile = cfg.dataDir ? join(cfg.dataDir, `responses-${cfg.contract.toLowerCase()}.json`) : undefined;
+  if (responsesFile) {
+    try {
+      const saved = JSON.parse(readFileSync(responsesFile, "utf8")) as { version: 1; responses: [string, Cached][] };
+      const now = Date.now();
+      if (saved?.version === 1) for (const [k, v] of saved.responses) if (v.expires >= now) responses.set(k, v);
+      log({ evt: "responses_loaded", responses: responses.size });
+    } catch {
+      // first start
+    }
+  }
+  function saveResponses() {
+    if (!responsesFile) return;
+    try {
+      mkdirSync(cfg.dataDir!, { recursive: true, mode: 0o700 });
+      const tmp = `${responsesFile}.tmp`;
+      writeFileSync(tmp, toJson({ version: 1, responses: [...responses] }), { mode: 0o600 });
+      renameSync(tmp, responsesFile);
+    } catch (err) {
+      log({ evt: "responses_save_error", error: String((err as Error)?.message ?? err) });
+    }
+  }
   function sweepResponses() {
     const now = Date.now();
     for (const [k, v] of responses) if (v.expires < now) responses.delete(k);
     while (responses.size > 10_000) responses.delete(responses.keys().next().value!);
   }
+
+  /**
+   * While someone holds an unpaid skip quote, the operator's own demo agents do not join: each join
+   * lands behind the quote's last ticket and raises the price of the skip they are approving (by up
+   * to the agent's skip price, more than the slippage buffer), which would fail it with price_moved.
+   * Real agents are never held. The hold lasts as long as the payment the quote asks for is valid.
+   */
+  let demoHoldUntil = 0;
+  let lastQuoteAt = 0;
+  const demoHoldMs = (cfg.paymentTimeoutS + 30) * 1000;
 
   /**
    * The two paid x402 resources. `POST /join` (body {skipPrice?}) creates a waiting ticket for the
@@ -154,6 +188,7 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
    */
   async function paid(kind: "join" | "skip", req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const t0 = performance.now();
+    const tArrived = Date.now();
     const body = await objectBody(req);
     const qs = url.searchParams;
     const rawPrice = qs.get("skipPrice") ?? body.skipPrice;
@@ -197,6 +232,10 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
         const reason = status === 402 && !failure ? offerError!.reason : error;
         return send(res, status === 402 && !failure ? offerError!.status : status, { x402Version: 1, error: reason, accepts: [], message: offerError!.message, ...extra }, headers);
       }
+      if (kind === "skip" && status === 402 && cfg.demoAgents.size > 0) {
+        demoHoldUntil = Math.max(demoHoldUntil, Date.now() + demoHoldMs);
+        lastQuoteAt = Date.now();
+      }
       headers[V2_REQUIRED_HEADER] = encodeHeader(v2PaymentRequired(o.requirements, error));
       send(res, status, { ...v1PaymentRequired(o.requirements, error), ...extra, quote: checkout.quoteJson(o.quote) }, headers);
     };
@@ -206,6 +245,10 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
     if ("error" in payment) return paymentRequired(400, payment.error, { message: payment.message });
     const payer = payment.payload.authorization.from;
     const nonce = payment.payload.authorization.nonce;
+    if (kind === "join" && Date.now() < demoHoldUntil && cfg.demoAgents.has(payer.toLowerCase())) {
+      const retryAfter = Math.max(1, Math.ceil((demoHoldUntil - Date.now()) / 1000));
+      return send(res, 503, { error: "quote_hold", message: `a skip quote is waiting for approval; demo agents join again in ${retryAfter}s. Nothing was charged.`, retryAfterSeconds: retryAfter }, { "retry-after": String(retryAfter) });
+    }
 
     // idempotency on the EIP-3009 nonce: the same payment gets the same response, and is never charged twice
     sweepResponses();
@@ -302,6 +345,9 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
     try {
       const c = { ...(await p), client };
       responses.set(key, c);
+      saveResponses();
+      // the quote this payment answers is settled: lift the hold unless someone was quoted since it arrived
+      if (kind === "skip" && lastQuoteAt < tArrived) demoHoldUntil = 0;
       send(res, c.status, c.body, c.headers);
     } catch (err) {
       if (!(err instanceof CheckoutError)) throw err;
