@@ -9,6 +9,12 @@ payment settles in USDC on Base, and **the paid response is the API answer plus 
 agent that was passed got its own asking price (pushed to its wallet), the unused buffer came back,
 and the request was served in the same call, in about 1.3 s on 2-second blocks.
 
+<img src="docs/dashboard.png" alt="x429 live dashboard: the line of waiting agents, each with its own price to be passed" width="100%">
+
+<img src="docs/demo-frames.png" alt="Frames from the demo video: your ticket is #5, the agents you pass get paid, a real run in Claude with PayBox" width="100%">
+
+<sub>Top: the live dashboard on Base mainnet, with four demo agents in line and the price each asks to be passed. Bottom: frames from the <a href="https://x.com/olaph_lol/status/2115066777822745084">demo video</a>.</sub>
+
 Category: **Merchant tools**. For API operators: sell priority on scarce capacity, and compensate
 everyone who waits instead of just bumping them.
 
