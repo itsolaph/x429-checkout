@@ -12,6 +12,12 @@ and the request was served in the same call, in about 1.3 s on 2-second blocks.
 Category: **Merchant tools**. For API operators: sell priority on scarce capacity, and compensate
 everyone who waits instead of just bumping them.
 
+**Live:** one of the 13 finalists of the first
+[PayBox Hackathon](https://x.com/moonpay/status/2113692877075484910), and enabled in the
+[PayBox Community Plugins Marketplace](https://app.paybox.sh/plugins) as *x429: Skip the Line*.
+Demo video: [on X](https://x.com/olaph_lol/status/2115066777822745084). Contract on Base:
+[`0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1`](https://basescan.org/address/0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1).
+
 - **PayBox plugin** (`plugin/`): six MCP tools over stdio, bundled into one `plugin.mjs` from the
   PayBox starter 1.0.2. The agent reads the queue, gets quotes, and receives x402 payment proposals
   that PayBox pays after a passkey approval.
