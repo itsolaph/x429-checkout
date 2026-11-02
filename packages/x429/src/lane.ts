@@ -142,7 +142,16 @@ export async function x429(options: X429Options): Promise<Lane> {
   // `lane` exists once everything is connected; until then log entries only reach the logger
   let lane: Lane | undefined;
   const logger = options.logger;
-  const log = (entry: LogEntry) => {
+  // RPC URLs can carry an API key in their path or query: log entries show only the host
+  const urls = [...new Set([cfg.rpcUrl, ...cfg.logsRpcUrls])].sort((a, b) => b.length - a.length);
+  const scrub = (v: unknown): unknown => {
+    if (typeof v === "string") return urls.reduce((s, u) => (s.includes(u) ? s.split(u).join(rpcHost(u)) : s), v);
+    if (Array.isArray(v)) return v.map(scrub);
+    if (v && typeof v === "object" && Object.getPrototypeOf(v) === Object.prototype) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrub(x)]));
+    return v;
+  };
+  const log = (raw: LogEntry) => {
+    const entry = scrub(raw) as LogEntry;
     try {
       logger?.(entry);
     } catch {

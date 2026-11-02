@@ -114,6 +114,22 @@ test("x429() refuses a wrong chain, an unknown queue, a foreign key and an unrea
   });
 });
 
+test("log entries show an RPC URL by its host only (its path may hold an API key)", { skip: skipReason }, async () => {
+  const entries: Record<string, unknown>[] = [];
+  const keyed = `${chain.rpc}/v2/secret-api-key`;
+  // anvil answers on any path, so the keyed URL works as the feed RPC
+  const lane = await x429({ ...onChain(), logsRpcUrls: [keyed], logger: (e) => entries.push(e) });
+  try {
+    lane.routes.failure(new Error(`HTTP request failed.\n\nURL: ${keyed}\nRequest body: {}`), "/x429/feed");
+  } finally {
+    lane.stop();
+  }
+  const line = entries.find((e) => e.evt === "error");
+  assert.ok(line, "the failure was logged");
+  assert.ok(!JSON.stringify(entries).includes("secret-api-key"));
+  assert.match(String(line.error), /URL: 127\.0\.0\.1:\d+/);
+});
+
 test("the operator key appears in no log entry, event and no inspected Lane", { skip: skipReason }, async () => {
   const entries: unknown[] = [];
   const lane = await x429({ ...onChain(), operatorKeyFile: chain.keyFile, logger: (e) => entries.push(e), capacity: { perIntervalMs: 50 }, autoStart: true, pollMs: 100 });
