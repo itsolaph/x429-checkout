@@ -1,0 +1,81 @@
+{
+  "name": "x429",
+  "version": "0.1.0",
+  "description": "Drop-in middleware that turns an API's 429s into a paid priority lane: callers pay (x402, USDC) to skip ahead, and everyone they pass is paid.",
+  "license": "MIT",
+  "type": "module",
+  "author": "olaph",
+  "homepage": "https://x429.lol",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itsolaph/x429-checkout.git",
+    "directory": "packages/x429"
+  },
+  "bugs": "https://github.com/itsolaph/x429-checkout/issues",
+  "keywords": [
+    "x402",
+    "429",
+    "rate-limit",
+    "agents",
+    "base",
+    "usdc",
+    "middleware"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./hono": {
+      "types": "./dist/adapters/hono.d.ts",
+      "default": "./dist/adapters/hono.js"
+    },
+    "./express": {
+      "types": "./dist/adapters/express.d.ts",
+      "default": "./dist/adapters/express.js"
+    },
+    "./node": {
+      "types": "./dist/adapters/node.d.ts",
+      "default": "./dist/adapters/node.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "viem": "^2.57.7"
+  },
+  "peerDependencies": {
+    "express": "^4.18.0 || ^5.0.0",
+    "hono": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    },
+    "hono": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@hono/node-server": "^2.1.6",
+    "express": "^5.3.0",
+    "hono": "^4.13.16"
+  }
+}

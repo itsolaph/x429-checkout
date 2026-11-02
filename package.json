@@ -17,7 +17,9 @@
     "test:contracts": "forge test --root contracts",
     "test:server": "node --test \"server/test/*.test.ts\"",
     "e2e": "bash scripts/e2e-local.sh",
-    "mcp:smoke": "bash scripts/mcp-smoke.sh"
+    "mcp:smoke": "bash scripts/mcp-smoke.sh",
+    "build:x429": "npm run build -w x429",
+    "test:x429": "npm test -w x429"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
@@ -29,5 +31,8 @@
     "esbuild": "0.28.2",
     "linkedom": "0.18.13",
     "typescript": "7.0.2"
-  }
+  },
+  "workspaces": [
+    "packages/*"
+  ]
 }

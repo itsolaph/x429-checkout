@@ -21,8 +21,8 @@
 // The server must list the demo addresses (printed at start) in X429_DEMO_AGENTS.
 import { readFileSync } from "node:fs";
 import { createPublicClient, http, type Address, type Hex } from "viem";
-import { usdcAbi } from "../server/src/chain.ts";
-import { fmtUsd, usdc } from "../server/src/protocol.ts";
+import { usdcAbi } from "../packages/x429/src/chain.ts";
+import { fmtUsd, usdc } from "../packages/x429/src/protocol.ts";
 import { SimAgent } from "./agent.ts";
 import { DemoBudget, walletLow } from "./demo-budget.ts";
 

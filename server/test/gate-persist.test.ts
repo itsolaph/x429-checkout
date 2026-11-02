@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Gate, type Admission } from "../src/gate.ts";
+import { Gate, type Admission } from "../../packages/x429/src/gate.ts";
 
 const contract = "0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1";
 

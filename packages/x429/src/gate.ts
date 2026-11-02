@@ -1,11 +1,12 @@
 // The admission gate in front of the busy API, and the operator loop that serves the queue head.
 //
-// One request is admitted per service interval. A request without a ticket is admitted only when the
-// queue is empty and the service is idle; otherwise it gets 429 with an x429 descriptor that prices a
-// skip. A served ticket redeems one request, either with the redeem token from its paid join/skip
-// (`POST /use`, the PayBox plugin path) or with an EIP-191 signature of its owner (headers).
+// Two capacity models. Interval: one request is admitted per service interval. Concurrency: requests
+// are admitted while fewer than N are in flight (a served ticket holds a slot until it uses its
+// request or its admission expires). A request without a ticket is admitted only when the queue is
+// empty and there is room; otherwise it gets 429 with an x429 offer that prices a skip. A served
+// ticket uses one request, either with the redeem token from its paid join/skip (`POST /use`, the
+// `X-429-Token` header, the PayBox plugin path) or with an EIP-191 signature of its owner (headers).
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import type { IncomingMessage } from "node:http";
 import { join } from "node:path";
 import { parseEventLogs, verifyMessage, type Address, type Hash, type Hex } from "viem";
 import { checkoutAbi } from "./abi.ts";
@@ -26,6 +27,8 @@ export type Admission = {
   paid: bigint;
   /** Set once the ticket used its request; repeated uses inside the admission window get the same answer. */
   result?: unknown;
+  /** Set once the ticket's request went through to the protected handler (no answer kept). */
+  passedThrough?: boolean;
 };
 
 /** Where a ticket stands for its owner, without using it. */
@@ -37,15 +40,17 @@ export type TicketStatus =
 
 /** What happened when a paid skip to #1 asked to be served inside its own request. */
 export type ServeNow =
-  | { status: "served"; admission: Admission; result: unknown; serveTx: Hash; serveConfirmed: boolean }
+  | { status: "served"; admission: Admission; serveTx: Hash; serveConfirmed: boolean; /** Set by the caller once the answer is built. */ result?: unknown }
   | { status: "busy"; reason: "slot_busy" | "not_head" | "serve_failed"; etaSeconds: number };
 
 /** You, in a 429: the ticket behind a redeem token. */
 export type You = { ticketId: bigint; owner: Address; position: number; status: string };
 
 export type GateDecision =
-  | { kind: "admit"; via: "direct" | "queue"; admission?: Admission }
+  | { kind: "admit"; via: "direct" | "queue" | "token"; admission?: Admission; release?: () => void }
   | { kind: "reject"; status: 429 | 403; body: unknown; retryAfterS?: number; headers?: Record<string, string> };
+
+export type Headers = Record<string, string | string[] | undefined>;
 
 export type TicketState = { id: string; status: "waiting" | "serving"; position: number } | null;
 
@@ -63,7 +68,15 @@ export class Gate {
   private readonly consumed = new Set<bigint>();
   /** Heads that paid to be #1: they skip the admission round when the slot frees up. */
   private readonly paidHeads = new Set<bigint>();
+  /** Answers being built (one per ticket at a time). */
+  private readonly making = new Map<bigint, Promise<unknown>>();
+  /** Concurrency model: requests running now, tickets a serve transaction is serving, the latency estimate. */
+  private inflight = 0;
+  private servingCount = 0;
+  private estimateMs = 0;
   readonly stats = { direct: 0, queued: 0, rejected429: 0, forbidden403: 0, served: 0, servedInRequest: 0, serveErrors: 0 };
+  /** Called on every 429 the gate builds (lane events). */
+  onReject: ((body: ReturnType<Gate["offer"]>) => void) | undefined;
 
   private readonly checkout: Checkout;
   private readonly log: Log;
@@ -74,6 +87,8 @@ export class Gate {
   constructor(checkout: Checkout, log: Log) {
     this.checkout = checkout;
     this.log = log;
+    const cap = checkout.cfg.capacity;
+    if (cap?.model === "concurrency") this.estimateMs = cap.estimateMs;
     const dir = checkout.cfg.dataDir;
     if (!dir) return;
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -102,6 +117,7 @@ export class Gate {
         earned: BigInt(a.earned as string),
         paid: BigInt(a.paid as string),
         ...(a.hasResult ? { result: a.result } : {}),
+        ...(a.passedThrough ? { passedThrough: true } : {}),
       };
       if (adm.expiresAt >= now) this.admissions.set(adm.ticketId, adm);
       else this.consumed.add(adm.ticketId);
@@ -142,13 +158,53 @@ export class Gate {
     this.timer = undefined;
   }
 
+  private get concurrency(): number | undefined {
+    const cap = this.cfg.capacity;
+    return cap?.model === "concurrency" ? cap.concurrency : undefined;
+  }
+
+  /** Concurrency model: slots neither running a request nor held by a served, unused ticket. */
+  slotsFree(): number {
+    const n = this.concurrency ?? 1;
+    let held = 0;
+    const now = Date.now();
+    for (const a of this.admissions.values()) if (a.result === undefined && !a.passedThrough && a.expiresAt >= now && !this.making.has(a.ticketId)) held++;
+    return n - this.inflight - held - this.servingCount;
+  }
+
+  /** Expected time per position: the service interval, or (concurrency) the latency estimate over N. */
+  intervalMs(): number {
+    const n = this.concurrency;
+    return n === undefined ? this.cfg.serviceIntervalMs : Math.max(1, Math.ceil(this.estimateMs / n));
+  }
+
+  /** Concurrency model: takes a slot; the returned function frees it (once) and feeds the latency estimate. */
+  private occupy(): () => void {
+    if (this.concurrency === undefined) return () => {};
+    this.inflight++;
+    const t0 = Date.now();
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.inflight = Math.max(0, this.inflight - 1);
+      this.estimateMs = Math.max(1, Math.round(this.estimateMs * 0.8 + (Date.now() - t0) * 0.2));
+    };
+  }
+
   /** Seconds until a request at `position` (1 = head) can expect to be served. */
   etaSeconds(position: number, snap?: Snapshot): number {
     const now = Date.now();
-    const free = Math.max(0, this.busyUntil - now);
     let roundLeft = 0;
     const head = snap?.tickets[0];
     if (head) roundLeft = Math.max(0, head.firstSeenMs + this.cfg.minQueueMs - now);
+    const n = this.concurrency;
+    if (n !== undefined) {
+      const ahead = Math.max(0, position - Math.max(0, this.slotsFree()));
+      const wait = Math.max(roundLeft, Math.ceil(ahead / n) * this.estimateMs);
+      return Math.max(1, Math.ceil(wait / 1000));
+    }
+    const free = Math.max(0, this.busyUntil - now);
     const wait = Math.max(free, roundLeft) + Math.max(0, position - 1) * this.cfg.serviceIntervalMs;
     return Math.max(1, Math.ceil(wait / 1000));
   }
@@ -169,7 +225,8 @@ export class Gate {
       currency: { symbol: "USDC", decimals: 6 },
       queueLength: snap?.length ?? 0,
       position,
-      serviceIntervalMs: cfg.serviceIntervalMs,
+      serviceIntervalMs: this.intervalMs(),
+      ...(this.concurrency !== undefined ? { concurrency: this.concurrency } : {}),
       admissionRoundMs: cfg.minQueueMs,
       admissionTtlMs: cfg.admissionTtlMs,
       suggestedSkipPrice: cfg.suggestedSkipPrice.toString(),
@@ -190,18 +247,18 @@ export class Gate {
               costUsd: fmtUsd(front.cost),
             }
           : null,
-        quotes: `${cfg.publicUrl}/queue/${cfg.queueId}`,
+        quotes: `${cfg.routeBase}/queue/${cfg.queueId}`,
       },
       join: {
         method: "POST",
-        url: `${cfg.publicUrl}/join`,
+        url: `${cfg.routeBase}/join`,
         body: { skipPrice: "<USDC units you are paid each time someone passes you>" },
         payment: "x402 exact: a small join fee, the rest refunded; the response carries your redeem token",
         maxSkipPrice: cfg.maxSkipPrice.toString(),
       },
       use: {
         method: "POST",
-        url: `${cfg.publicUrl}/use`,
+        url: `${cfg.routeBase}/use`,
         body: { token: "<redeem token from the paid /join or /skip response>" },
         answers: "429 with position and ETA while you wait; 200 with the API result once you are served",
       },
@@ -213,12 +270,12 @@ export class Gate {
       gaslessJoin: cfg.legacyJoin
         ? {
             method: "POST",
-            url: `${cfg.publicUrl}/join/signed`,
-            typedData: `${cfg.publicUrl}/join/typed-data?owner=<address>&skipPrice=<units>`,
+            url: `${cfg.routeBase}/join/signed`,
+            typedData: `${cfg.routeBase}/join/typed-data?owner=<address>&skipPrice=<units>`,
           }
         : null,
       payouts: cfg.autoPayout ? "automatic: whoever passes you pays you, and the operator sends it to your wallet" : "claim",
-      mcp: `${cfg.publicUrl}/mcp`,
+      ...cfg.descriptorExtras,
     };
   }
 
@@ -248,7 +305,7 @@ export class Gate {
             maxAmount: front.maxAmountRequired.toString(),
             waitSavedSeconds: Math.max(0, eta - this.etaSeconds(1, snap)),
             method: "POST",
-            url: `${cfg.publicUrl}/skip`,
+            url: `${cfg.routeBase}/skip`,
             body: { target: 1, ...(you ? { owner: you.owner } : {}) },
             payment: "x402 exact, USDC on Base; the unused part of maxAmount is refunded",
             plugin: { tool: "x429_skip", arguments: { targetPosition: 1 } },
@@ -257,11 +314,11 @@ export class Gate {
         : null,
       wait: you
         ? { plugin: { tool: "x429_use", arguments: { token: "<your token>" } } }
-        : { method: "POST", url: `${cfg.publicUrl}/join`, plugin: { tool: "x429_join", arguments: {} } },
+        : { method: "POST", url: `${cfg.routeBase}/join`, plugin: { tool: "x429_join", arguments: {} } },
       next: front
         ? `Pay ${fmtUsd(front.cost)} to go first (x429_skip, or POST /skip {"target":1} with x402); the paid response is the answer. Or wait about ${eta} s${you ? " and call x429_use" : " after x429_join"}.`
         : `Retry in about ${eta} s.`,
-      descriptor: `${cfg.publicUrl}/x429`,
+      descriptor: cfg.descriptorUrl,
     };
   }
 
@@ -288,27 +345,25 @@ export class Gate {
     return `Busy. You are #${position} in line; skipping to the front costs ${fmtUsd(front.cost)} right now, paid to the ${n} agent${n === 1 ? "" : "s"} you pass.`;
   }
 
-  /** Decides whether a request to the busy API may run now. */
-  async admit(req: IncomingMessage): Promise<GateDecision> {
-    const rawId = header(req, TICKET_HEADER);
-    const rawSig = header(req, SIGNATURE_HEADER);
+  /** Decides whether a request to the busy API may run now (ticket headers, or a direct admission). */
+  async admit(headers: Headers): Promise<GateDecision> {
+    const rawId = header(headers, TICKET_HEADER);
+    const rawSig = header(headers, SIGNATURE_HEADER);
     if (rawId !== undefined || rawSig !== undefined) return this.admitTicket(rawId ?? "", rawSig ?? "");
     const snap = await this.checkout.reader.get().catch(() => this.checkout.reader.latest);
     const now = Date.now();
-    if (snap && snap.length === 0 && !this.serving && now >= this.busyUntil) {
+    if (this.concurrency !== undefined) {
+      if (snap && snap.length === 0 && !this.serving && this.slotsFree() > 0) {
+        this.stats.direct++;
+        this.log({ evt: "admit", via: "direct" });
+        return { kind: "admit", via: "direct", release: this.occupy() };
+      }
+    } else if (snap && snap.length === 0 && !this.serving && now >= this.busyUntil) {
       this.busyUntil = now + this.cfg.serviceIntervalMs;
       this.stats.direct++;
       this.log({ evt: "admit", via: "direct" });
       return { kind: "admit", via: "direct" };
     }
-    const position = (snap?.length ?? 0) + 1;
-    return this.tooMany(snap, null, this.etaSeconds(position, snap), position);
-  }
-
-  private tooMany(snap: Snapshot | undefined, ticket: TicketState, retryAfterS: number, position: number): GateDecision {
-    void ticket;
-    void retryAfterS;
-    void position;
     return this.reject429(snap);
   }
 
@@ -316,6 +371,11 @@ export class Gate {
   reject429(snap: Snapshot | undefined, you?: You): GateDecision & { kind: "reject" } {
     this.stats.rejected429++;
     const body = this.offer(snap, you);
+    try {
+      this.onReject?.(body);
+    } catch {
+      // observers never change the answer
+    }
     return { kind: "reject", status: 429, retryAfterS: body.etaSeconds, body, headers: this.offerHeaders(body) };
   }
 
@@ -363,26 +423,23 @@ export class Gate {
       this.save();
       this.stats.queued++;
       this.log({ evt: "admit", via: "queue", ticketId: id, owner: adm.owner, waited: adm.waited });
-      return { kind: "admit", via: "queue", admission: adm };
+      return { kind: "admit", via: "queue", admission: adm, release: this.occupy() };
     }
 
     // not admitted (yet): look the ticket up onchain
     const t = await this.checkout.client
       .readContract({ address: this.cfg.contract, abi: checkoutAbi, functionName: "tickets", args: [id] })
       .catch(() => undefined);
-    if (!t) return this.tooMany(this.checkout.reader.latest, null, 2, 0);
+    if (!t) return this.reject429(this.checkout.reader.latest);
     const [owner, queueId, status] = t;
     if (status === 0 || queueId !== this.cfg.queueId) return this.forbidden("unknown_ticket", id);
     const ok = await verifyMessage({ address: owner, message, signature: sig }).catch(() => false);
     if (!ok) return this.forbidden("bad_signature", id);
     if (status === 1) {
       const snap = await this.checkout.reader.get().catch(() => this.checkout.reader.latest);
-      const position = snap?.tickets.find((x) => x.id === id)?.position ?? 0;
-      return this.tooMany(snap, { id: id.toString(), status: "waiting", position }, this.etaSeconds(position || 1, snap), position);
+      return this.reject429(snap);
     }
-    if (status === 2 && this.serving) {
-      return this.tooMany(this.checkout.reader.latest, { id: id.toString(), status: "serving", position: 0 }, 1, 0);
-    }
+    if (status === 2 && this.serving) return this.reject429(this.checkout.reader.latest);
     return this.forbidden(status === 2 ? "not_admitted" : "ticket_left", id);
   }
 
@@ -415,19 +472,52 @@ export class Gate {
   /**
    * Uses a served ticket's request (token path). `make` builds the API answer once; using the ticket
    * again inside its admission window returns that same answer, so a lost response is not a lost request.
+   * Without `make` this only reports where the ticket stands (see `passThrough`).
    */
-  async use(id: bigint, make: (adm: Admission) => unknown): Promise<TicketStatus & { result?: unknown; replayed?: boolean }> {
+  async use(id: bigint, make?: (adm: Admission) => unknown): Promise<TicketStatus & { result?: unknown; replayed?: boolean }> {
     const st = await this.inspect(id);
     if (st.status !== "ready" && st.status !== "used") return st;
-    const adm = st.admission;
-    const replayed = adm.result !== undefined;
-    if (!replayed) {
-      adm.result = make(adm);
+    if (!make || st.admission.passedThrough) return st;
+    const { result, replayed } = await this.answer(st.admission, make, "token");
+    return { ...st, status: "used", result, replayed };
+  }
+
+  /**
+   * The answer for a served ticket, built once by `make` (concurrent callers share it) and kept for
+   * the admission window. Concurrency model: building it occupies a slot.
+   */
+  async answer(adm: Admission, make: (adm: Admission) => unknown, via: string): Promise<{ result: unknown; replayed: boolean }> {
+    if (adm.result !== undefined) return { result: adm.result, replayed: true };
+    const pending = this.making.get(adm.ticketId);
+    if (pending) return { result: await pending, replayed: true };
+    const release = this.occupy();
+    const p = (async () => make(adm))();
+    this.making.set(adm.ticketId, p);
+    try {
+      const result = await p;
+      adm.result = result === undefined ? null : result;
       this.save();
-      this.stats.queued++;
-      this.log({ evt: "admit", via: "token", ticketId: id, owner: adm.owner, waited: adm.waited });
+      if (via !== "paid_skip") this.stats.queued++; // serveNow counted the paid #1 already
+      if (via !== "paid_skip") this.log({ evt: "admit", via, ticketId: adm.ticketId, owner: adm.owner, waited: adm.waited });
+      return { result: adm.result, replayed: false };
+    } finally {
+      this.making.delete(adm.ticketId);
+      release();
     }
-    return { ...st, status: "used", result: adm.result, replayed };
+  }
+
+  /**
+   * Lets a served ticket's request through to the protected handler, once (token path without a
+   * `serve` hook). Returns undefined when the ticket is not ready or already used.
+   */
+  passThrough(adm: Admission): (() => void) | undefined {
+    if (adm.result !== undefined || adm.passedThrough || this.making.has(adm.ticketId)) return undefined;
+    adm.passedThrough = true;
+    const release = this.occupy();
+    this.save();
+    this.stats.queued++;
+    this.log({ evt: "admit", via: "token", ticketId: adm.ticketId, owner: adm.owner, waited: adm.waited });
+    return release;
   }
 
   /**
@@ -437,14 +527,9 @@ export class Gate {
    * so nobody waiting is treated worse than they asked for. Must run inside the relayer's `exclusive`
    * (right after the settlement). `confirm` waits for the serve receipt; otherwise the serve is sent
    * and confirmed in the background (it is the operator's own transaction; the payer's transfer is
-   * already included).
+   * already included). The answer is built afterwards with `answer`, outside the relayer lock.
    */
-  async serveNow(
-    ticketId: bigint,
-    make: (adm: Admission) => unknown,
-    confirm: boolean,
-    atHead?: { owner: Address; paid: bigint },
-  ): Promise<ServeNow> {
+  async serveNow(ticketId: bigint, confirm: boolean, atHead?: { owner: Address; paid: bigint }): Promise<ServeNow> {
     const relayer = this.checkout.relayer!;
     const now = Date.now();
     const snap = this.checkout.reader.latest;
@@ -459,20 +544,29 @@ export class Gate {
       this.paidHeads.add(ticketId);
       if (this.paidHeads.size > 1_000) this.paidHeads.delete(this.paidHeads.values().next().value!);
     }
+    const concurrent = this.concurrency !== undefined;
     if (this.serving) {
-      return { status: "busy", reason: "slot_busy", etaSeconds: Math.max(1, Math.ceil((Math.max(this.busyUntil, now + 1000) - now) / 1000)) };
+      return { status: "busy", reason: "slot_busy", etaSeconds: concurrent ? this.etaSeconds(1, snap) : Math.max(1, Math.ceil((Math.max(this.busyUntil, now + 1000) - now) / 1000)) };
     }
     if (!head || head.id !== ticketId) return { status: "busy", reason: "not_head", etaSeconds: this.etaSeconds(1, snap) };
-    // A paid #1 takes the slot even inside the current service interval: it already paid every ticket
-    // it passed, so making it wait out someone else's interval sells a place without the service.
-    // The next scheduled serve moves back one interval, so the API still sees one extra request at most.
-    const preempted = now < this.busyUntil;
+    // Concurrency model: a paid #1 is served at once when a slot is free, else it is next.
+    if (concurrent && this.slotsFree() <= 0) return { status: "busy", reason: "slot_busy", etaSeconds: this.etaSeconds(1, snap) };
+    // Interval model: a paid #1 takes the slot even inside the current service interval: it already
+    // paid every ticket it passed, so making it wait out someone else's interval sells a place without
+    // the service. The next scheduled serve moves back one interval, so the API still sees one extra
+    // request at most.
+    const preempted = !concurrent && now < this.busyUntil;
     this.serving = true;
-    this.busyUntil = Math.max(this.busyUntil, now) + this.cfg.serviceIntervalMs;
+    if (!concurrent) this.busyUntil = Math.max(this.busyUntil, now) + this.cfg.serviceIntervalMs;
+    else this.servingCount = 1;
+    let finished = false;
     const done = (ok: boolean) => {
+      if (finished) return;
+      finished = true;
       this.serving = false;
+      this.servingCount = 0;
       this.lastServeAt = Date.now();
-      if (!ok) this.busyUntil = Math.max(this.busyUntil, Date.now() + 2000);
+      if (!ok && !concurrent) this.busyUntil = Math.max(this.busyUntil, Date.now() + 2000);
       void this.checkout.reader.refresh().catch(() => {});
     };
     try {
@@ -528,14 +622,14 @@ export class Gate {
           },
         );
       }
-      adm.result = make(adm);
       this.admissions.set(ticketId, adm);
+      if (concurrent) this.servingCount = 0; // the admission now holds the slot
       this.save();
       this.stats.served++;
       this.stats.queued++;
       this.stats.servedInRequest++;
       this.log({ evt: "admit", via: "paid_skip", ticketId, owner: adm.owner, serveTx: adm.servedTx, confirmed: serveConfirmed, preempted });
-      return { status: "served", admission: adm, result: adm.result, serveTx: adm.servedTx, serveConfirmed };
+      return { status: "served", admission: adm, serveTx: adm.servedTx, serveConfirmed };
     } catch (err) {
       this.stats.serveErrors++;
       this.log({ evt: "serve_error", via: "paid_skip", ticketId, error: String((err as Error)?.message ?? err).split("\n")[0] });
@@ -557,19 +651,28 @@ export class Gate {
     }
     if (snap.length === 0 || snap.fetchedAt <= this.lastServeAt) return;
     const now = Date.now();
-    if (now < this.busyUntil) return;
+    const concurrent = this.concurrency !== undefined;
+    if (concurrent ? this.slotsFree() <= 0 : now < this.busyUntil) return;
     const head = snap.tickets[0]!;
     // a queue of demo agents only is kept waiting: serving it would only make them pay to rejoin
     if (this.cfg.holdDemoOnly && this.cfg.demoAgents.size > 0 && snap.tickets.every((t) => this.cfg.demoAgents.has(t.owner.toLowerCase()))) return;
-    if (!this.paidHeads.has(head.id) && now < head.firstSeenMs + this.cfg.minQueueMs) return; // admission round still open
+    const ready = (t: { id: bigint; firstSeenMs: number }) => this.paidHeads.has(t.id) || now >= t.firstSeenMs + this.cfg.minQueueMs;
+    if (!ready(head)) return; // admission round still open
+    // concurrency model: serve as many heads at once as there are free slots (and whose round is over)
+    let count = 1;
+    if (concurrent) {
+      const max = Math.min(this.slotsFree(), 16);
+      while (count < max && count < snap.tickets.length && ready(snap.tickets[count]!)) count++;
+    }
     this.ticking = true;
     try {
       // `serving` is set only once the relayer is ours: while a paid skip settles, it must still be
       // able to serve its own ticket at once (it checks `serving`), and this tick then stands down.
       const receipt = await relayer.exclusive(async () => {
-        if (Date.now() < this.busyUntil) return undefined;
+        if (concurrent ? this.slotsFree() < count : Date.now() < this.busyUntil) return undefined;
         this.serving = true;
-        return relayer.call("serve", [this.cfg.queueId, 1], "serve");
+        if (concurrent) this.servingCount = count;
+        return relayer.call("serve", [this.cfg.queueId, count], "serve");
       });
       if (!receipt) return;
       const servedAt = Date.now();
@@ -577,7 +680,7 @@ export class Gate {
       for (const ev of parseEventLogs({ abi: checkoutAbi, logs: receipt.logs, eventName: "Served" })) {
         const a = ev.args;
         // a paid #1 already answered in its own request keeps that answer (one request per ticket)
-        if (this.admissions.get(a.ticketId)?.result !== undefined) continue;
+        if (this.admissions.get(a.ticketId)?.result !== undefined || this.making.has(a.ticketId)) continue;
         this.admissions.set(a.ticketId, {
           ticketId: a.ticketId,
           owner: a.owner,
@@ -590,7 +693,7 @@ export class Gate {
           paid: a.paid,
         });
         this.stats.served++;
-        this.busyUntil = servedAt + this.cfg.serviceIntervalMs;
+        if (!concurrent) this.busyUntil = servedAt + this.cfg.serviceIntervalMs;
         this.log({ evt: "served", ticketId: a.ticketId, owner: a.owner, timesPassed: a.timesPassed, earned: a.earned, paid: a.paid, tx: receipt.transactionHash, gasUsed: receipt.gasUsed });
       }
       this.save();
@@ -601,17 +704,23 @@ export class Gate {
       this.log({ evt: "serve_error", error: String((err as Error)?.message ?? err).split("\n")[0] });
     } finally {
       this.serving = false;
+      this.servingCount = 0;
       this.ticking = false;
       void this.checkout.reader.refresh().catch(() => {});
     }
   }
 
   snapshotStats() {
-    return { ...this.stats, admissions: this.admissions.size, busyUntil: this.busyUntil };
+    return {
+      ...this.stats,
+      admissions: this.admissions.size,
+      busyUntil: this.busyUntil,
+      ...(this.concurrency !== undefined ? { inflight: this.inflight, slotsFree: this.slotsFree(), estimateMs: this.estimateMs } : {}),
+    };
   }
 }
 
-function header(req: IncomingMessage, name: string): string | undefined {
-  const v = req.headers[name.toLowerCase()];
+function header(headers: Headers, name: string): string | undefined {
+  const v = headers[name.toLowerCase()];
   return Array.isArray(v) ? v[0] : v;
 }

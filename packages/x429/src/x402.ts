@@ -76,13 +76,17 @@ export function v1PaymentRequired(input: RequirementsInput, error: string) {
   return { x402Version: 1, error, accepts: [v1Requirements(input)] };
 }
 
+/** Optional discovery data for the v2 object: resource metadata and `extensions` (x402 Bazaar). */
+export type Discovery = { resource: Record<string, unknown>; extensions: Record<string, unknown> };
+
 /** The v2 `PaymentRequired` object (sent base64 in the PAYMENT-REQUIRED header). */
-export function v2PaymentRequired(input: RequirementsInput, error: string) {
+export function v2PaymentRequired(input: RequirementsInput, error: string, discovery?: Discovery) {
   return {
     x402Version: 2,
     error,
-    resource: { url: input.resourceUrl, description: input.description, mimeType: "application/json" },
+    resource: { url: input.resourceUrl, description: input.description, mimeType: "application/json", ...discovery?.resource },
     accepts: [v2Requirements(input)],
+    ...(discovery ? { extensions: discovery.extensions } : {}),
   };
 }
 
@@ -101,6 +105,8 @@ export type DecodedPayment = {
   payload: ExactPayload;
   /** v2 only: the requirements the client says it accepted. */
   accepted?: { network?: string; asset?: string; payTo?: string; amount?: string; extra?: Record<string, unknown> };
+  /** The decoded header object as sent (v2: forwarded to a Bazaar facilitator when configured). */
+  raw?: Record<string, unknown>;
 };
 
 export type PaymentDecodeError = { error: "invalid_payload" | "invalid_x402_version"; message: string };
@@ -175,6 +181,7 @@ export function readPayment(headers: Record<string, string | string[] | undefine
     network: String(accepted?.network ?? ""),
     payload: { signature: signature as Hex, authorization },
     accepted,
+    raw: body,
   };
 }
 

@@ -10,10 +10,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { createPublicClient, createWalletClient, http, parseAbi, parseSignature, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { checkoutAbi } from "../server/src/abi.ts";
-import { chainFor, usdcAbi } from "../server/src/chain.ts";
-import { fmtUsd } from "../server/src/protocol.ts";
-import { decodeHeader } from "../server/src/x402.ts";
+import { checkoutAbi } from "../packages/x429/src/abi.ts";
+import { chainFor, usdcAbi } from "../packages/x429/src/chain.ts";
+import { fmtUsd } from "../packages/x429/src/protocol.ts";
+import { decodeHeader } from "../packages/x429/src/x402.ts";
 import { SimAgent } from "./agent.ts";
 import { PluginClient } from "./plugin-client.ts";
 import { spawn, type ChildProcess } from "node:child_process";

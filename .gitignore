@@ -15,3 +15,7 @@ contracts/broadcast/
 
 # built dashboard
 site/
+
+# x429 package build output and env templates
+packages/*/dist/
+.env.x429

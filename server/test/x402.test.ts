@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { verifyTypedData, type Address } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { BASE_USDC, transferWithAuthorizationTypedData, transferWithAuthorizationTypes, usdcDomain } from "../src/protocol.ts";
+import { BASE_USDC, transferWithAuthorizationTypedData, transferWithAuthorizationTypes, usdcDomain } from "../../packages/x429/src/protocol.ts";
 import {
   buildPaymentHeader,
   decodeHeader,
@@ -10,7 +10,7 @@ import {
   v1PaymentRequired,
   v2PaymentRequired,
   type RequirementsInput,
-} from "../src/x402.ts";
+} from "../../packages/x429/src/x402.ts";
 
 // anvil's well-known test key #0
 const payer = privateKeyToAccount("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { RateLimiter } from "../src/ratelimit.ts";
+import { RateLimiter } from "../../packages/x429/src/ratelimit.ts";
 
 test("allows `limit` hits per window per key, then refuses until the window slides", () => {
   const rl = new RateLimiter(2, 1_000);

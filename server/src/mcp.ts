@@ -10,10 +10,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { CheckoutError, parseAddress, parseUint, type Checkout } from "./checkout.ts";
-import { plain, toJson } from "./json.ts";
-import { SIGNATURE_HEADER, TICKET_HEADER, fmtUsd, ticketMessage } from "./protocol.ts";
-import { v1PaymentRequired } from "./x402.ts";
+import { CheckoutError, parseAddress, parseUint, type Checkout } from "../../packages/x429/src/checkout.ts";
+import { plain, toJson } from "../../packages/x429/src/json.ts";
+import { SIGNATURE_HEADER, TICKET_HEADER, fmtUsd, ticketMessage } from "../../packages/x429/src/protocol.ts";
+import { v1PaymentRequired } from "../../packages/x429/src/x402.ts";
 
 const address = z.string().regex(/^0x[0-9a-fA-F]{40}$/).describe("EVM address (your PayBox wallet address on Base)");
 const units = z.string().regex(/^[0-9]{1,30}$/).describe("USDC amount in base units (6 decimals): 5000 = $0.005");

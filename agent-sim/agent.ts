@@ -6,8 +6,8 @@
 import { randomBytes } from "node:crypto";
 import { type Address, type Hex, type LocalAccount } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { SIGNATURE_HEADER, TICKET_HEADER, ticketMessage, transferWithAuthorizationTypedData } from "../server/src/protocol.ts";
-import { buildPaymentHeader, decodeHeader, type ExactPayload } from "../server/src/x402.ts";
+import { SIGNATURE_HEADER, TICKET_HEADER, ticketMessage, transferWithAuthorizationTypedData } from "../packages/x429/src/protocol.ts";
+import { buildPaymentHeader, decodeHeader, type ExactPayload } from "../packages/x429/src/x402.ts";
 
 export type HttpResult<T = any> = { status: number; body: T; headers: Headers };
 

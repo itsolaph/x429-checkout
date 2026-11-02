@@ -1,5 +1,5 @@
-// The x429 Checkout service: quotes, gasless join/claim relays and x402 skip settlement.
-// HTTP routes (app.ts) and MCP tools (mcp.ts) are thin wrappers over this class.
+// The x429 Checkout service: quotes, x402 join/skip settlement, payouts and the legacy gasless
+// join/claim relays. The lane's HTTP routes (routes.ts) are thin wrappers over this class.
 import {
   getAddress,
   isAddress,
@@ -132,6 +132,8 @@ export class Checkout {
   private joinFeeCache: { value: bigint; at: number } | undefined;
   /** Called with the owners a skip just passed (the payout queue listens). */
   onPassed: ((owners: Address[]) => void) | undefined;
+  /** Called (synchronously, errors ignored) once a skip payment passed the local checks, before it settles. */
+  onSkipVerified: ((payment: DecodedPayment) => void) | undefined;
 
   constructor(cfg: Config, client: PublicClient, reader: QueueReader, relayer: Relayer | undefined, log: Log, tokens?: TokenStore) {
     this.joinLimiter = new RateLimiter(cfg.joinsPerMinute, 60_000);
@@ -364,7 +366,7 @@ export class Checkout {
   }
 
   skipResourceUrl(target?: number, skipPrice?: bigint, owner?: Address): string {
-    const u = new URL(`${this.cfg.publicUrl}/skip`);
+    const u = new URL(`${this.cfg.routeBase}/skip`);
     if (target !== undefined) {
       u.searchParams.set("queue", String(this.cfg.queueId));
       u.searchParams.set("target", String(target));
@@ -437,7 +439,7 @@ export class Checkout {
     if (snap.length >= snap.maxLength) throw new CheckoutError(409, "queue_full", "the queue is full");
     const amount = fee > 0n ? fee : 1n;
     const now = Math.floor(Date.now() / 1000);
-    const resourceUrl = `${this.cfg.publicUrl}/join`;
+    const resourceUrl = `${this.cfg.routeBase}/join`;
     const position = snap.length + 1;
     return {
       joinFee: fee,
@@ -598,6 +600,11 @@ export class Checkout {
   ): Promise<SkipResult | ReplayResult> {
     const relayer = this.requireRelayer();
     const { auth, fail } = await this.verifyPayment(payment);
+    try {
+      this.onSkipVerified?.(payment);
+    } catch {
+      // an observer never fails a payment
+    }
     return relayer.exclusive(async () => {
       const { frontRun, replayOf } = await this.preflight(auth, fail);
       if (replayOf !== undefined) return this.replayResult(replayOf, auth.from);

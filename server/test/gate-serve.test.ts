@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { encodeEventTopics, encodeAbiParameters, type Address } from "viem";
-import { checkoutAbi } from "../src/abi.ts";
-import { Gate } from "../src/gate.ts";
+import { checkoutAbi } from "../../packages/x429/src/abi.ts";
+import { Gate } from "../../packages/x429/src/gate.ts";
 
 const contract = "0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1" as Address;
 const me = "0xCe12eCb70f431Aab1bC35dDfc81F51c061467E66" as Address;
@@ -45,7 +45,7 @@ function harness(snapHead: { id: bigint; owner: Address }, servedOnchain: { id: 
 
 test("a paid #1 is served in its request even when the reader still shows the old head", async () => {
   const { gate, calls } = harness({ id: 4n, owner: other }, { id: 9n, owner: me });
-  const r = await gate.serveNow(9n, () => ({ ok: true }), true, { owner: me, paid: 15000n });
+  const r = await gate.serveNow(9n, true, { owner: me, paid: 15000n });
   assert.equal(r.status, "served");
   assert.deepEqual(calls, ["serve"]);
   const adm = (r as { admission: { paid: bigint; waited: number } }).admission;
@@ -57,14 +57,14 @@ test("a paid #1 preempts the current service interval instead of answering busy"
   const { gate, g } = harness({ id: 9n, owner: me }, { id: 9n, owner: me });
   const before = Date.now() + 10_000;
   g.busyUntil = before; // someone was served 5 s ago
-  const r = await gate.serveNow(9n, () => ({ ok: true }), true, { owner: me, paid: 15000n });
+  const r = await gate.serveNow(9n, true, { owner: me, paid: 15000n });
   assert.equal(r.status, "served");
   assert.ok(g.busyUntil >= before + 15_000 - 50, "the next scheduled serve moves back one interval");
 });
 
 test("if serve() served someone else, the payer hears not_head and the other ticket keeps its admission", async () => {
   const { gate, g } = harness({ id: 9n, owner: me }, { id: 4n, owner: other });
-  const r = await gate.serveNow(9n, () => ({ ok: true }), true, { owner: me, paid: 15000n });
+  const r = await gate.serveNow(9n, true, { owner: me, paid: 15000n });
   assert.equal(r.status, "busy");
   assert.equal((r as { reason: string }).reason, "not_head");
   assert.ok(g.admissions.has(4n));

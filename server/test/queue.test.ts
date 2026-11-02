@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { Address } from "viem";
-import { isQuoteError, quoteSkip, type Snapshot } from "../src/queue.ts";
+import { isQuoteError, quoteSkip, type Snapshot } from "../../packages/x429/src/queue.ts";
 
 const addr = (i: number) => `0x${i.toString(16).padStart(40, "0")}` as Address;
 

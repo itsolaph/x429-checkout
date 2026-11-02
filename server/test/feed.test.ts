@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, type Address } from "viem";
-import { checkoutAbi } from "../src/abi.ts";
+import { checkoutAbi } from "../../packages/x429/src/abi.ts";
+import { Routes } from "../../packages/x429/src/routes.ts";
 import { createApp } from "../src/app.ts";
-import { decodeState, encodeState, Feed, type FeedRpc } from "../src/feed.ts";
+import { decodeState, encodeState, Feed, type FeedRpc } from "../../packages/x429/src/feed.ts";
 
 const contract = "0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1" as Address;
 const alice = "0xCe12eCb70f431Aab1bC35dDfc81F51c061467E66" as Address;
@@ -244,11 +245,13 @@ test("GET /feed reports sync progress and allows any origin", async () => {
   await feed.poll();
   const snap = { tickets: [], blockTime: 0, blockNumber: 1n };
   const checkout = {
-    cfg: { chainId: 8453, contract, queueId: 1, explorer: "https://basescan.org", demoAgents: new Set(), serviceIntervalMs: 15_000 },
+    cfg: { chainId: 8453, contract, queueId: 1, explorer: "https://basescan.org", demoAgents: new Set(), serviceIntervalMs: 15_000, prefix: "", paymentTimeoutS: 120 },
     reader: { latest: snap, get: async () => snap },
     queueJson: () => [],
   };
-  const server = createApp({ checkout: checkout as never, gate: {} as never, feed, log: () => {} });
+  const gate = { intervalMs: () => 15_000 };
+  const routes = new Routes({ checkout: checkout as never, gate: gate as never, feed, log: () => {} });
+  const server = createApp({ lane: { cfg: checkout.cfg, checkout, routes } as never });
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
   try {
     const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/feed`, { headers: { origin: "https://dash.example" } });
