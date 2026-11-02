@@ -3,88 +3,126 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>x429 Checkout · live queue</title>
-    <meta name="description" content="A rate-limited API that sells priority and pays the people who wait. Live queue and payouts on Base." />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23101318'/%3E%3Cpath d='M4 11h8M4 8h5M4 5h3' stroke='%23f2b84b' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <title>x429: Skip the Line, live on Base</title>
+    <meta name="description" content="429 is the new 402. Agents pay to skip a busy API's line, and every agent they pass gets paid in USDC on Base. Watch the live line." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://x429.lol/" />
+    <meta property="og:title" content="x429: Skip the Line" />
+    <meta property="og:description" content="429 is the new 402. Agents pay to skip a busy API's line, and every agent they pass gets paid." />
+    <meta property="og:image" content="https://x429.lol/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#FBFBF9" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23E4432D' d='M3 6h26v6.5a3.5 3.5 0 0 0 0 7V26H3v-6.5a3.5 3.5 0 0 0 0-7z'/%3E%3Ctext x='16' y='20.5' text-anchor='middle' font-family='Arial Narrow,Arial,sans-serif' font-weight='700' font-size='12' fill='%23FBFBF9'%3E429%3C/text%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <header class="top">
-      <div class="brand">
-        <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span class="name">x429 <b>checkout</b></span>
-      </div>
-      <div class="net">
-        <span class="dot" id="live-dot" title="live"></span>
-        <span id="net-label">connecting…</span>
-        <a id="contract-link" class="mono" target="_blank" rel="noopener"></a>
-      </div>
-    </header>
+    <div class="page">
+      <header class="top">
+        <p class="brand"><b>x429</b> Skip the Line</p>
+        <p class="status" aria-live="polite">
+          <span id="live-dot" class="live">Connecting</span><span id="net-sep"> to </span><span id="net-label">Base mainnet</span>
+        </p>
+      </header>
 
-    <main>
-      <section class="hero">
-        <div class="hero-main">
-          <p class="eyebrow">Paid to agents waiting</p>
-          <p class="big" id="paid-total">$0</p>
-          <p class="sub" id="hero-sub">429 is the new 402: agents pay to skip the line, and everyone they pass gets paid. Each passed ticket gets its own posted price, in USDC on Base, pushed to its wallet.</p>
-        </div>
-        <dl class="stats">
-          <div><dt>in line</dt><dd id="s-length">0</dd></div>
-          <div><dt>skips</dt><dd id="s-skips">0</dd></div>
-          <div><dt>tickets passed</dt><dd id="s-passes">0</dd></div>
-          <div><dt>served</dt><dd id="s-served">0</dd></div>
-          <div><dt>in wallets</dt><dd id="s-claimed">$0</dd></div>
-          <div><dt>operator fees</dt><dd id="s-fees">$0</dd></div>
-        </dl>
-      </section>
-
-      <section class="panel lastskip" id="lastskip" hidden>
-        <div class="panel-head">
-          <h2>Last skip</h2>
-          <a class="hint mono" id="lastskip-tx" target="_blank" rel="noopener"></a>
-        </div>
-        <p class="headline" id="lastskip-headline"></p>
-        <ul class="payouts" id="lastskip-payouts"></ul>
-      </section>
-
-      <section class="grid">
-        <div class="panel line">
-          <div class="panel-head">
-            <h2>The line</h2>
-            <span class="hint" id="front-price"></span>
+      <main>
+        <section class="hero" aria-labelledby="hero-title">
+          <div class="pitch">
+            <h1 id="hero-title">429 is the new 402.</h1>
+            <p class="lede">Agents pay to skip a busy API’s line, and every agent they pass gets paid.</p>
+            <div class="actions">
+              <a class="btn primary" href="https://app.paybox.sh/plugins" target="_blank" rel="noopener">Try it in PayBox</a>
+              <a class="btn" href="https://github.com/itsolaph/x429-checkout" target="_blank" rel="noopener">Read the code</a>
+            </div>
+            <p class="award"><a href="https://x.com/PayBox/status/2117345605361996103" target="_blank" rel="noopener">1st place, PayBox Hackathon Chapter 1</a></p>
           </div>
-          <ol id="queue" class="queue"></ol>
-          <p class="empty" id="queue-empty">Nobody is waiting. The API admits the next request directly.</p>
-        </div>
 
-        <div class="panel ledger">
-          <div class="panel-head">
-            <h2>Ledger</h2>
-            <span class="hint">newest first · links open the explorer</span>
+          <div class="line" aria-labelledby="line-title">
+            <div class="line-head">
+              <h2 id="line-title">The line</h2>
+              <p id="front-price" class="front-price"></p>
+            </div>
+            <div class="strip" id="strip">
+              <div class="serving" id="serving" hidden>
+                <p class="serving-label">Now serving</p>
+                <p class="serving-ticket" id="serving-ticket"></p>
+              </div>
+              <ol id="queue" class="queue" aria-label="Tickets in line, first in line first"></ol>
+              <div class="next-slot" id="next-slot" hidden aria-hidden="true">
+                <p class="next-pos" id="next-pos"></p>
+                <p class="next-text">The next agent joins here.</p>
+              </div>
+            </div>
+            <p class="line-note" id="queue-empty">Loading the live line.</p>
           </div>
-          <ul id="feed" class="feed"></ul>
-        </div>
+        </section>
 
-        <div class="panel earners">
-          <div class="panel-head">
-            <h2>Who got paid</h2>
-            <span class="hint">compensation for being passed</span>
+        <section class="panel receipt" id="lastskip" aria-labelledby="lastskip-title">
+          <div class="receipt-head">
+            <h2 id="lastskip-title">Last skip</h2>
+            <p class="receipt-meta"><span id="lastskip-when"></span> <a id="lastskip-tx" target="_blank" rel="noopener" hidden>View on Basescan</a></p>
           </div>
-          <table>
-            <thead><tr><th>agent</th><th class="num">earned</th><th class="bar-col"></th></tr></thead>
-            <tbody id="earners"></tbody>
-          </table>
-        </div>
-      </section>
-    </main>
+          <p class="receipt-headline quiet" id="lastskip-headline">The last skip loads with the live line.</p>
+          <ul class="payouts" id="lastskip-payouts"></ul>
+        </section>
 
-    <footer>
-      <p>
-        HTTP 429 with a price. A waiting agent posts what it wants for being passed; anyone may move ahead by paying every
-        ticket it passes. Payments are x402 (EIP-3009 USDC on Base); the operator pushes each payout to its wallet. Demo agents are labeled.
-      </p>
-      <p class="mono small" id="source"></p>
-    </footer>
+        <section class="totals" aria-labelledby="totals-title">
+          <h2 id="totals-title" class="sr-only">Totals</h2>
+          <dl class="figures" id="figures">
+            <div><dt>Paid to waiting agents</dt><dd id="paid-total" class="fig skeleton" data-v=""><span class="sr-only">Loading</span></dd></div>
+            <div><dt>Skips</dt><dd id="s-skips" class="fig skeleton" data-v=""><span class="sr-only">Loading</span></dd></div>
+            <div><dt>Tickets passed</dt><dd id="s-passes" class="fig skeleton" data-v=""><span class="sr-only">Loading</span></dd></div>
+            <div><dt>Served</dt><dd id="s-served" class="fig skeleton" data-v=""><span class="sr-only">Loading</span></dd></div>
+          </dl>
+          <p class="totals-note" id="totals-note"></p>
+        </section>
+
+        <section class="how" aria-labelledby="how-title">
+          <h2 id="how-title">How a skip works</h2>
+          <ol class="steps">
+            <li><span class="step-n" aria-hidden="true">1</span><p>The API answers 429 with a price.</p></li>
+            <li><span class="step-n" aria-hidden="true">2</span><p>One passkey approval in PayBox pays USDC on Base.</p></li>
+            <li><span class="step-n" aria-hidden="true">3</span><p>The same transaction pays every agent passed and returns the API answer plus a receipt.</p></li>
+          </ol>
+        </section>
+
+        <div class="records">
+          <section class="panel ledger" aria-labelledby="ledger-title">
+            <div class="panel-head">
+              <h2 id="ledger-title">Ledger</h2>
+              <p class="panel-note">Newest first. Times link to the transaction on Basescan.</p>
+            </div>
+            <table id="feed-table" hidden>
+              <thead><tr><th scope="col">Kind</th><th scope="col">What happened</th><th scope="col" class="when">When</th></tr></thead>
+              <tbody id="feed"></tbody>
+            </table>
+            <p class="panel-empty" id="feed-empty">The ledger loads with the live line.</p>
+            <button type="button" class="more" id="feed-more" hidden>Show the full ledger</button>
+          </section>
+
+          <section class="panel earners" aria-labelledby="earners-title">
+            <div class="panel-head">
+              <h2 id="earners-title">Who got paid</h2>
+              <p class="panel-note">Earned for being passed.</p>
+            </div>
+            <ul id="earners" class="earner-list"></ul>
+            <p class="panel-empty" id="earners-empty">Nobody has been passed yet.</p>
+          </section>
+        </div>
+      </main>
+
+      <footer class="foot">
+        <p>Contract <a id="contract-link" class="hex" target="_blank" rel="noopener">on Basescan</a>, queue <span id="queue-id">1</span>, on Base mainnet.</p>
+        <p id="source">Data comes from the server’s <code>/feed</code>, which indexes the contract’s events.</p>
+        <p>Demo agents are run by the operator and labeled.</p>
+        <p><a href="https://github.com/itsolaph/x429-checkout" target="_blank" rel="noopener">Source on GitHub</a>, MIT licensed. <a href="https://x.com/PayBox/status/2117345605361996103" target="_blank" rel="noopener">The PayBox announcement</a>.</p>
+        <p>Set in Archivo and IBM Plex Mono, both under the SIL Open Font License.</p>
+      </footer>
+    </div>
 
     <script type="module" src="app.js"></script>
   </body>
