@@ -209,10 +209,7 @@ export async function adapterApps(lane: Lane): Promise<Apps> {
   const { serve } = await import("@hono/node-server");
   const app = new Hono<{ Variables: { x429: { via: string; admission?: { ticketId: bigint } } } }>();
   const hmw = x429Hono(lane) as never;
-  if (lane.cfg.prefix) {
-    app.use(lane.cfg.prefix, hmw);
-    app.use(`${lane.cfg.prefix}/*`, hmw);
-  }
+  if (lane.cfg.prefix) app.use(`${lane.cfg.prefix}/*`, hmw); // also matches the bare prefix (the descriptor)
   app.use("/api/*", hmw);
   app.get("/api/data", async (c) => {
     await wait(hold(c.req.url));

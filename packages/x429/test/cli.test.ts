@@ -76,6 +76,11 @@ test("deploy --dry-run simulates and sends nothing; deploy, queue create and sta
   assert.equal(await c.client.readContract({ address: contract, abi: checkoutAbi, functionName: "usdc" }), c.usdc);
   for (const out of [dry.out, dry.err, real.out, real.err]) assert.ok(!out.toLowerCase().includes(KEYS[0]!.slice(2)), "the key is never printed");
 
+  // a token without USDC's EIP-712 domain would refuse every payment: deploy says so before sending
+  const wrongToken = await cli(["deploy", "--rpc", c.rpc, "--key-file", c.keyFile, "--usdc", contract, "--dry-run"]);
+  assert.equal(wrongToken.code, 2);
+  assert.match(wrongToken.err, /has EIP-712 domain name null, version null; x429 needs an EIP-3009 token with "USD Coin", "2"/);
+
   const empty = await cli(["status", "--rpc", c.rpc, "--contract", contract]);
   assert.equal(empty.code, 0);
   assert.match(empty.out, /0 queue\(s\); queue 1 does not exist \(run x429 queue create\)/);

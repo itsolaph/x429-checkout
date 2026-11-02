@@ -9,6 +9,7 @@ import {
   http,
   isAddress,
   getAddress,
+  parseAbi,
   parseEventLogs,
   type Address,
   type Hex,
@@ -19,15 +20,14 @@ import { checkoutAbi } from "./abi.ts";
 import { checkoutBytecode, checkoutCompiler } from "./bytecode.ts";
 import { chainFor, decodeRevert } from "./chain.ts";
 import { readOperatorKey } from "./config.ts";
-import { BASE_CHAIN_ID, BASE_USDC, fmtUsd, usdc } from "./protocol.ts";
+import { BASE_CHAIN_ID, BASE_USDC, USDC_EIP712, fmtUsd, usdc } from "./protocol.ts";
 
 export const VERSION = "0.1.0";
 
-/** Native USDC by chain id (Base, Base Sepolia). Other chains need --usdc. */
-export const KNOWN_USDC: Record<number, Address> = {
-  [BASE_CHAIN_ID]: BASE_USDC,
-  84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-};
+/** Native USDC by chain id. Other chains need --usdc. */
+export const KNOWN_USDC: Record<number, Address> = { [BASE_CHAIN_ID]: BASE_USDC };
+
+const tokenAbi = parseAbi(["function name() view returns (string)", "function version() view returns (string)"]);
 
 export const MAINNETS = new Set([1, 8453, 10, 42161, 137]);
 
@@ -202,6 +202,14 @@ async function deploy(p: Parsed, io: Io): Promise<number> {
   if (!token) throw new UsageError(`no known USDC on chain ${chainId}: pass --usdc <address>`);
   const code = await client.getCode({ address: token });
   if (!code || code === "0x") throw new UsageError(`--usdc ${token} has no code on chain ${chainId}`);
+  // the lane verifies EIP-3009 signatures against USDC's domain: another domain would refuse every payment
+  const [name, version] = await Promise.all([
+    client.readContract({ address: token, abi: tokenAbi, functionName: "name" }).catch(() => undefined),
+    client.readContract({ address: token, abi: tokenAbi, functionName: "version" }).catch(() => undefined),
+  ]);
+  if (name !== USDC_EIP712.name || version !== USDC_EIP712.version) {
+    throw new UsageError(`--usdc ${token} has EIP-712 domain name ${JSON.stringify(name ?? null)}, version ${JSON.stringify(version ?? null)}; x429 needs an EIP-3009 token with "${USDC_EIP712.name}", "${USDC_EIP712.version}" (native USDC on Base)`);
+  }
   guardMainnet(chainId, p.flags);
   const args = [token, account.address] as const;
   const data = encodeDeployData({ abi: checkoutAbi, bytecode: checkoutBytecode, args });
