@@ -2,10 +2,10 @@
 import { resolve } from "node:path";
 import { checkoutAbi } from "./abi.ts";
 import { createApp } from "./app.ts";
-import { Relayer, makePublicClient } from "./chain.ts";
+import { Relayer, makeLogsClients, makePublicClient } from "./chain.ts";
 import { Checkout } from "./checkout.ts";
 import { loadConfig } from "./config.ts";
-import { Feed } from "./feed.ts";
+import { Feed, rpcHost } from "./feed.ts";
 import { Gate } from "./gate.ts";
 import { ForecastService } from "./forecast.ts";
 import { Payouts } from "./payouts.ts";
@@ -34,7 +34,28 @@ if (relayer && operator.toLowerCase() !== relayer.address.toLowerCase()) {
 const tokens = new TokenStore(cfg.dataDir ? resolve(cfg.dataDir) : undefined, cfg.contract);
 const checkout = new Checkout(cfg, client, reader, relayer, log, tokens);
 const gate = new Gate(checkout, log);
-const feed = new Feed(client, cfg.contract, cfg.queueId, cfg.deployBlock);
+const logsRpcs = makeLogsClients(cfg);
+// A feed RPC on another chain would book foreign events: refuse to start. One that does not answer now is
+// only logged; the feed rotates past it.
+const logsChains = await Promise.allSettled(
+  logsRpcs.map((r) =>
+    Promise.race([r.client.getChainId(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 10_000).unref())]),
+  ),
+);
+logsChains.forEach((r, i) => {
+  const host = rpcHost(logsRpcs[i]!.url);
+  if (r.status === "fulfilled" && r.value !== cfg.chainId) throw new Error(`X429_LOGS_RPC_URL ${host} is chain ${r.value}, expected ${cfg.chainId}`);
+  if (r.status === "rejected") log({ evt: "feed_rpc_error", host, error: "chain id check failed at startup" });
+});
+const feed = new Feed({
+  rpcs: logsRpcs,
+  chainId: cfg.chainId,
+  contract: cfg.contract,
+  queueId: cfg.queueId,
+  fromBlock: cfg.deployBlock,
+  dataDir: cfg.dataDir ? resolve(cfg.dataDir) : undefined,
+  log,
+});
 const payouts = new Payouts(checkout, feed, log);
 const forecasts = new ForecastService(cfg.forecastSource);
 const server = createApp({ checkout, gate, feed, log, payouts, forecasts, siteDir: cfg.siteDir ? resolve(cfg.siteDir) : undefined });

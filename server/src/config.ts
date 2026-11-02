@@ -5,6 +5,8 @@ import { BASE_CHAIN_ID, BASE_USDC, usdc } from "./protocol.ts";
 
 export type Config = {
   rpcUrl: string;
+  /** RPCs the event feed reads (getLogs, getBlock, getBlockNumber), rotated on errors. Default: [rpcUrl]. */
+  logsRpcUrls: string[];
   chainId: number;
   usdc: Address;
   contract: Address;
@@ -84,8 +86,15 @@ export function loadConfig(): Config {
   const host = env("X429_HOST", "127.0.0.1");
   const port = int("X429_PORT", 8429);
   const interval = int("X429_SERVICE_INTERVAL_MS", 15_000);
+  const rpcUrl = env("X429_RPC_URL", "http://127.0.0.1:8545");
+  const logsRpcUrls = env("X429_LOGS_RPC_URL", "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter((u) => u !== "");
+  for (const u of logsRpcUrls) if (!/^https?:\/\//.test(u)) throw new Error("X429_LOGS_RPC_URL entries must be http(s) URLs");
   return {
-    rpcUrl: env("X429_RPC_URL", "http://127.0.0.1:8545"),
+    rpcUrl,
+    logsRpcUrls: logsRpcUrls.length > 0 ? logsRpcUrls : [rpcUrl],
     chainId: int("X429_CHAIN_ID", BASE_CHAIN_ID),
     usdc: address("X429_USDC", BASE_USDC),
     contract: address("X429_CONTRACT"),

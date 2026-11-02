@@ -6,6 +6,8 @@
 #   journalctl -u x429-checkout -f
 #
 # Put a TLS reverse proxy (e.g. Caddy or nginx) in front: X429_HOST=127.0.0.1, X429_PUBLIC_URL=https://<your host>.
+# In server.env, set X429_DATA_DIR=/var/lib/x429 (feed progress, tokens) and a getLogs-friendly feed RPC,
+# e.g. X429_LOGS_RPC_URL=https://base-rpc.publicnode.com,https://base.drpc.org (see .env.example).
 [Unit]
 Description=x429 Checkout server (paid priority queue, x402 on Base)
 After=network-online.target

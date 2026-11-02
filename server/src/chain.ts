@@ -48,6 +48,20 @@ export function makePublicClient(cfg: Pick<Config, "chainId" | "rpcUrl">): Publi
   }) as PublicClient;
 }
 
+/**
+ * Read-only clients for the event feed, one per X429_LOGS_RPC_URL entry. The feed rotates between them
+ * itself, so each retries little: a rate-limited RPC should not hold the feed up for long.
+ */
+export function makeLogsClients(cfg: Pick<Config, "chainId" | "logsRpcUrls">): { url: string; client: PublicClient }[] {
+  return cfg.logsRpcUrls.map((url) => ({
+    url,
+    client: createPublicClient({
+      chain: chainFor({ chainId: cfg.chainId, rpcUrl: url }),
+      transport: http(url, { retryCount: 1, retryDelay: 500, timeout: 20_000 }),
+    }) as PublicClient,
+  }));
+}
+
 /** A contract revert decoded into its custom error name and args. */
 export class RevertError extends Error {
   readonly errorName: string;

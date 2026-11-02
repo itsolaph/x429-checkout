@@ -565,6 +565,8 @@ export function createApp({ checkout, gate, feed, log, payouts, forecasts: fc, s
         demoAgents: [...cfg.demoAgents],
         serviceIntervalMs: cfg.serviceIntervalMs,
         totals: feed.totals,
+        // indexing progress: while caughtUp is false the totals are partial (catching up), not zero
+        sync: feed.sync,
         queue: checkout.queueJson(snap),
         events: feed.recent(limit),
       });

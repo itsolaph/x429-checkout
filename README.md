@@ -245,6 +245,10 @@ Automatic payouts zero each owner's claimable, so every later pass writes a fres
   in between; PayBox then refuses (amount above the proposal) and the agent asks for a fresh proposal.
 - Admissions (served, not yet used tickets) live in server memory; a restart drops them. Tokens and
   payment records persist in `X429_DATA_DIR`.
+- The event feed indexes with `eth_getLogs` from `X429_LOGS_RPC_URL` (comma-separated, rotated on
+  errors; default `X429_RPC_URL`) and saves its progress in `X429_DATA_DIR`, so a restart resumes
+  instead of re-indexing. `/feed` reports `sync: { next, head, caughtUp }`; totals are partial until
+  `caughtUp`. `mainnet.base.org` rate-limits getLogs, so point the feed at another RPC.
 - x402 payers must sign as EOAs (EIP-7702-delegated EOAs work); settlement uses `v,r,s`.
 
 ## Credits
