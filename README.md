@@ -65,13 +65,33 @@ agent (PayBox + x429 plugin)     x429 server                              X429Ch
 The protocol is in [docs/SPEC.md](docs/SPEC.md) (v0.3 changes in its first section), the submission
 details (portal hosts, variables, test inputs, demo script) in [docs/SUBMISSION.md](docs/SUBMISSION.md).
 
+## Use it in your API
+
+The engine behind x429.lol is the npm package [`x429`](packages/x429/README.md): middleware for
+Hono, Express or plain `node:http` that gives your API the same 429 offer, paid joins and skips,
+payouts and feed, settled in your own X429Checkout (`npx x429 deploy` ships the bytecode).
+
+```ts
+import { x429 } from "x429";
+import { x429Hono } from "x429/hono";
+const lane = await x429({ contract, queueId, rpcUrl, operatorKey, publicUrl, capacity: { perIntervalMs: 15000 } });
+app.use("/x429/*", x429Hono(lane));
+app.use("/forecast/*", x429Hono(lane));
+```
+
+Options, capacity models (fixed interval or concurrency), pricing, security notes and limits are in
+[packages/x429/README.md](packages/x429/README.md); runnable Express and Hono examples with the exact
+commands for a local anvil fork are in [examples/](examples/README.md).
+
 ## Layout
 
 | Path | What |
 |---|---|
 | `plugin/` | the PayBox plugin: starter 1.0.2 tooling unchanged, tools in `src/plugin.ts`, `pnpm test` = type-check + two identical builds + conformance |
 | `contracts/` | Foundry project: `X429Checkout.sol`, unit/fuzz/invariant tests with a mock EIP-3009 USDC, fork tests against Base USDC, deploy script |
-| `server/` | TypeScript (runs `.ts` directly): busy API, x402 `/join` and `/skip`, `/use`, `/quote`, `/ticket`, `/earnings`, payouts, operator serve loop, event feed, legacy MCP server |
+| `packages/x429/` | the `x429` npm package: the lane (gate, x402 `/join` and `/skip`, `/use`, `/quote`, `/ticket`, `/earnings`, payouts, operator serve loop, event feed), adapters, CLI, its tests |
+| `server/` | x429.lol on top of the package (runs `.ts` directly): the busy forecast API, `/healthz`, the legacy MCP server, the dashboard |
+| `examples/` | Express and Hono examples behind x429, and their smoke test on an anvil fork |
 | `agent-sim/` | test agents that sign with local test keys what a PayBox wallet signs, a PayBox x402 simulator, a stdio client for the plugin, the end-to-end scenario, and a demo-agent runner |
 | `web/` | dashboard source (no framework); `npm run build:web` writes `site/` |
 | `scripts/` | `e2e-local.sh`, `mcp-smoke.sh`, the shared fork setup, `deploy-base.sh`, `start-server.sh`, ABI export, dashboard render check |
@@ -81,7 +101,7 @@ details (portal hosts, variables, test inputs, demo script) in [docs/SUBMISSION.
 ## Requirements
 
 - [Foundry](https://getfoundry.sh) (`forge`, `anvil`, `cast`)
-- Server and tests: Node.js 26 (runs TypeScript directly) and npm
+- Server and tests: Node.js 26 (runs TypeScript directly) and npm; the `x429` package itself runs on Node.js 20 or newer
 - Plugin: Node.js 24.21.0 and pnpm 11.11.0 (the PayBox reference toolchain)
 - Network access to a public Base RPC, only to *read* state for the local fork
 
@@ -99,6 +119,8 @@ forge test --root contracts                                   # unit + fuzz + in
 FOUNDRY_PROFILE=offline forge test --root contracts           # without the fork tests (no network)
 npm run test:server                                           # x402 codec and quote math
 npm run typecheck                                             # tsc over server, agent-sim, scripts, web
+npm run test:x429                                             # the package: builds it, then 24 tests on a local anvil (no network)
+npm run build:x429 && npm run test:examples                   # the examples on an anvil fork of Base
 npm run e2e                                                   # full x402 flow + the plugin over stdio, on an anvil fork of Base
 npm run mcp:smoke                                             # legacy remote MCP server on the fork
 ```
