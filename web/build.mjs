@@ -1,6 +1,6 @@
 // Builds the dashboard into site/: bundles web/src/main.ts and copies the static files.
 import { build } from "esbuild";
-import { copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,5 +19,6 @@ await build({
   sourcemap: false,
   legalComments: "none",
 });
-for (const f of ["index.html", "style.css"]) copyFileSync(join(root, "web", f), join(out, f));
-console.log("built site/ (index.html, style.css, app.js)");
+const files = ["index.html", "style.css", "og.png"].filter((f) => existsSync(join(root, "web", f)));
+for (const f of files) copyFileSync(join(root, "web", f), join(out, f));
+console.log(`built site/ (${[...files, "app.js"].join(", ")})`);
