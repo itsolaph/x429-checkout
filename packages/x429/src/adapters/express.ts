@@ -21,8 +21,9 @@ function laneRequest(req: ExpressRequest): LaneRequest {
     url: req.originalUrl ?? req.url ?? "/",
     headers: req.headers,
     ip: req.socket?.remoteAddress,
-    // a body parser that ran (express.json sets _body) already consumed the stream
-    body: () => (body ??= req._body ? Promise.resolve(emptyToUndefined(req.body)) : readStreamBody(req)),
+    // a body parser that ran already consumed the stream: body-parser 1 (Express 4) sets _body,
+    // body-parser 2 (Express 5) leaves req.body undefined unless it parsed
+    body: () => (body ??= (req._body || (req.body !== undefined && req.readableEnded)) ? Promise.resolve(emptyToUndefined(req.body)) : readStreamBody(req)),
   };
 }
 
