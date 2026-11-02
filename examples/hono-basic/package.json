@@ -1,0 +1,8 @@
+{
+  "name": "x429-example-hono",
+  "private": true,
+  "type": "module",
+  "description": "A small busy API behind x429 with Hono on Node",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "@hono/node-server": "^2.1.6", "hono": "^4.13.16", "x429": "*" }
+}

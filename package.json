@@ -19,7 +19,8 @@
     "e2e": "bash scripts/e2e-local.sh",
     "mcp:smoke": "bash scripts/mcp-smoke.sh",
     "build:x429": "npm run build -w x429",
-    "test:x429": "npm test -w x429"
+    "test:x429": "npm test -w x429",
+    "test:examples": "node --test examples/smoke.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
@@ -33,6 +34,7 @@
     "typescript": "7.0.2"
   },
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "examples/*"
   ]
 }

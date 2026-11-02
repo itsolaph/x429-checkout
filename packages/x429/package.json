@@ -51,15 +51,12 @@
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
-    "bin/x429.js",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE"
+    "bin/x429.js"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.json --noEmit",
-    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "npm run build && tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"test/*.test.ts\"",
     "prepack": "npm run build"
   },
   "dependencies": {
