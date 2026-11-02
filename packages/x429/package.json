@@ -45,9 +45,13 @@
     "./package.json": "./package.json"
   },
   "types": "./dist/index.d.ts",
+  "bin": {
+    "x429": "bin/x429.js"
+  },
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
+    "bin/x429.js",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -75,6 +79,7 @@
   },
   "devDependencies": {
     "@hono/node-server": "^2.1.6",
+    "@types/express": "^5.0.6",
     "express": "^5.3.0",
     "hono": "^4.13.16"
   }
