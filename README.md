@@ -21,7 +21,7 @@ everyone who waits instead of just bumping them.
 **Live:** 🥇 [1st place](https://x.com/PayBox/status/2117345605361996103) in the first
 [PayBox Hackathon](https://x.com/moonpay/status/2113692877075484910) (Chapter 1), and enabled in the
 [PayBox Community Plugins Marketplace](https://app.paybox.sh/plugins) as *x429: Skip the Line*.
-Demo video: [on X](https://x.com/olaph_lol/status/2115066777822745084). Contract on Base:
+Live server: [x429.lol](https://x429.lol). Demo video: [on X](https://x.com/olaph_lol/status/2115066777822745084). Contract on Base:
 [`0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1`](https://basescan.org/address/0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1).
 
 - **PayBox plugin** (`plugin/`): six MCP tools over stdio, bundled into one `plugin.mjs` from the
