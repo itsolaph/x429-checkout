@@ -21,8 +21,9 @@
     "build:x429": "npm run build -w x429",
     "test:x429": "npm test -w x429",
     "test:examples": "node --test examples/smoke.test.ts",
-    "test:render": "npm test -w x429-render",
-    "render": "npm start -w x429-render"
+    "test:render": "npm run build:x429 && npm test -w x429-render",
+    "render": "npm start -w x429-render",
+    "e2e:render": "bash scripts/render-e2e.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

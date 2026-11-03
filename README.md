@@ -24,6 +24,10 @@ everyone who waits instead of just bumping them.
 Live server: [x429.lol](https://x429.lol). Demo video: [on X](https://x.com/olaph_lol/status/2115066777822745084). Contract on Base:
 [`0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1`](https://basescan.org/address/0x1B70dcDC800a0B18c7a3100a9833FA4e923044C1).
 
+Running in production: [x429.lol](https://x429.lol) (demo) and [render.x429.lol](https://render.x429.lol)
+(a real busy API on the package: any page after its JavaScript, as markdown or a PNG, two at a time;
+[`apps/render/`](apps/render)).
+
 - **PayBox plugin** (`plugin/`): six MCP tools over stdio, bundled into one `plugin.mjs` from the
   PayBox starter 1.0.2. The agent reads the queue, gets quotes, and receives x402 payment proposals
   that PayBox pays after a passkey approval.
@@ -92,9 +96,10 @@ commands for a local anvil fork are in [examples/](examples/README.md).
 | `packages/x429/` | the `x429` npm package: the lane (gate, x402 `/join` and `/skip`, `/use`, `/quote`, `/ticket`, `/earnings`, payouts, operator serve loop, event feed), adapters, CLI, its tests |
 | `server/` | x429.lol on top of the package (runs `.ts` directly): the busy forecast API, `/healthz`, the legacy MCP server, the dashboard |
 | `examples/` | Express and Hono examples behind x429, and their smoke test on an anvil fork |
+| `apps/render/` | render.x429.lol: Chromium renders (markdown or PNG) behind an x429 lane with 2 slots, SSRF guard on every browser request, its tests and deploy files |
 | `agent-sim/` | test agents that sign with local test keys what a PayBox wallet signs, a PayBox x402 simulator, a stdio client for the plugin, the end-to-end scenario, and a demo-agent runner |
 | `web/` | dashboard source (no framework); `npm run build:web` writes `site/` |
-| `scripts/` | `e2e-local.sh`, `mcp-smoke.sh`, the shared fork setup, `deploy-base.sh`, `start-server.sh`, ABI export, dashboard render check |
+| `scripts/` | `e2e-local.sh`, `render-e2e.sh`, `mcp-smoke.sh`, the shared fork setup, `deploy-base.sh`, `start-server.sh`, ABI export, dashboard render check |
 | `deploy/` | systemd unit |
 | `docs/` | `SPEC.md` (protocol), `SUBMISSION.md` (PayBox portal), `PAYBOX.md` (v0.2 agent flow, legacy) |
 
@@ -121,6 +126,8 @@ npm run test:server                                           # x402 codec and q
 npm run typecheck                                             # tsc over server, agent-sim, scripts, web
 npm run test:x429                                             # the package: builds it, then 26 tests on a local anvil (no network)
 npm run build:x429 && npm run test:examples                   # the examples on an anvil fork of Base
+npm run test:render                                           # apps/render: SSRF guard, robots, real Chromium, the lane on a local anvil
+bash scripts/render-e2e.sh                                    # render.x429.lol on an anvil fork of Base: 429, a paid skip, the payout
 npm run e2e                                                   # full x402 flow + the plugin over stdio, on an anvil fork of Base
 npm run mcp:smoke                                             # legacy remote MCP server on the fork
 ```
