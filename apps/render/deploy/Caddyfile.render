@@ -1,0 +1,27 @@
+# Caddy site block for render.x429.lol. Add it to the Caddyfile (e.g. /etc/caddy/Caddyfile) and reload:
+#   sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+#
+# No `log` directive on purpose: Caddy's access log would record full request URIs, query strings
+# included (the target URL of every render). The app logs host and path only.
+render.x429.lol {
+	encode zstd gzip
+
+	request_body {
+		max_size 64KB
+	}
+
+	reverse_proxy 127.0.0.1:8440 {
+		# the client address the per-address free bucket uses (RENDER_TRUST_PROXY=1 reads the last entry)
+		header_up X-Forwarded-For {remote_host}
+		transport http {
+			response_header_timeout 60s
+		}
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000"
+	}
+}

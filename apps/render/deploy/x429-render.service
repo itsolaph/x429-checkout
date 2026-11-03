@@ -1,0 +1,32 @@
+# systemd user unit for render.x429.lol (apps/render). Install as the user that owns the checkout:
+#
+#   mkdir -p ~/.config/systemd/user && cp apps/render/deploy/x429-render.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now x429-render
+#   sudo loginctl enable-linger "$USER"        # keep it running without a login session
+#   journalctl --user -u x429-render -f
+#
+# Paths: the checkout at ~/x429-checkout, the env file and the operator key in ~/.x429-render (chmod 700,
+# files chmod 600). Node 24 or newer must be first on PATH below (`node --version`). See DEPLOY.md.
+[Unit]
+Description=render.x429.lol: Chromium renders behind an x429 lane (x402, USDC on Base)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/x429-checkout
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/env node --env-file=%h/.x429-render/render.env apps/render/src/main.ts
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=25
+# Chromium and Node together; past this the unit is killed and restarted
+MemoryMax=1500M
+TasksMax=512
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
