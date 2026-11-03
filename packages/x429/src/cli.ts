@@ -285,7 +285,27 @@ async function queueCreate(p: Parsed, io: Io): Promise<number> {
     return 1;
   }
   queueId = created.args.queueId;
-  const { request: feeRequest } = await client.simulateContract({ account, address: contract, abi: checkoutAbi, functionName: "setJoinFee", args: [queueId, joinFee] });
+  // print the id first: if setJoinFee fails below, the queue still exists and the caller needs it
+  io.out(`X429_QUEUE_ID=${queueId}`);
+  if (joinFee === 0n) {
+    io.out(`created in ${hash}; join fee 0 (the contract's default, no setJoinFee sent)`);
+    return 0;
+  }
+  // a load-balanced public RPC can answer from a node that has not seen the new queue yet
+  // (UnknownQueue), so the setJoinFee simulation is retried for a while
+  let feeRequest;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      ({ request: feeRequest } = await client.simulateContract({ account, address: contract, abi: checkoutAbi, functionName: "setJoinFee", args: [queueId, joinFee] }));
+      break;
+    } catch (err) {
+      if (attempt >= 8) {
+        io.err(`setJoinFee would fail: ${why(err)}; the queue exists with join fee 0, set it later with setJoinFee`);
+        return 1;
+      }
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+  }
   const feeHash = await wallet.writeContract(feeRequest);
   const feeReceipt = await client.waitForTransactionReceipt({ hash: feeHash, timeout: 180_000 });
   if (feeReceipt.status !== "success") {
@@ -293,7 +313,6 @@ async function queueCreate(p: Parsed, io: Io): Promise<number> {
     return 1;
   }
   io.out(`created in ${hash}, join fee set in ${feeHash}`);
-  io.out(`X429_QUEUE_ID=${queueId}`);
   return 0;
 }
 
