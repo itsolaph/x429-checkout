@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { Address } from "viem";
 import { bazaarDeclaration, bazaarResource, type BazaarConfig } from "./bazaar.ts";
 import { CheckoutError, parseAddress, parseUint, type Checkout, type Log, type SkipResult } from "./checkout.ts";
-import type { ServeHook } from "./config.ts";
+import type { ServeHook, ValidateHook } from "./config.ts";
 import type { Feed } from "./feed.ts";
 import type { Gate, ServeNow } from "./gate.ts";
 import { clientIp, json, preflight, type LaneRequest, type LaneResponse } from "./http.ts";
@@ -32,6 +32,7 @@ export type RoutesDeps = {
   log: Log;
   payouts?: Payouts;
   serve?: ServeHook;
+  validate?: ValidateHook;
   bazaar?: BazaarConfig;
 };
 
@@ -48,6 +49,7 @@ export class Routes {
   private readonly log: Log;
   private readonly payouts: Payouts | undefined;
   private readonly serve: ServeHook | undefined;
+  private readonly validate: ValidateHook | undefined;
   private readonly discovery: Discovery | undefined;
 
   /**
@@ -78,6 +80,7 @@ export class Routes {
     this.log = d.log;
     this.payouts = d.payouts;
     this.serve = d.serve;
+    this.validate = d.validate;
     this.discovery = d.bazaar ? { resource: bazaarResource(d.bazaar), extensions: { bazaar: bazaarDeclaration(d.bazaar) } } : undefined;
     const cfg = d.checkout.cfg;
     this.prefix = cfg.prefix;
@@ -137,6 +140,17 @@ export class Routes {
       return r;
     } catch (err) {
       return this.failure(err, req.url);
+    }
+  }
+
+  /** Runs the `validate` option on a request's params; a refusal is thrown as a CheckoutError (400 unless it is one). */
+  async check(params: Record<string, unknown>, route: "skip" | "use" | "token"): Promise<void> {
+    if (!this.validate) return;
+    try {
+      await this.validate(params, { route });
+    } catch (err) {
+      if (err instanceof CheckoutError) throw err;
+      throw new CheckoutError(400, "invalid_request", String((err as Error)?.message ?? err).split("\n")[0]!.slice(0, 300));
     }
   }
 
@@ -347,7 +361,10 @@ export class Routes {
     };
 
     const payment = readPayment(req.headers);
-    if (!payment) return paymentRequired(402, "X-PAYMENT (v1) or PAYMENT-SIGNATURE (v2) header is required");
+    if (!payment) {
+      if (kind === "skip") await this.check(params, "skip");
+      return paymentRequired(402, "X-PAYMENT (v1) or PAYMENT-SIGNATURE (v2) header is required");
+    }
     if ("error" in payment) return paymentRequired(400, payment.error, { message: payment.message });
     const payer = payment.payload.authorization.from;
     const nonce = payment.payload.authorization.nonce;
@@ -366,6 +383,8 @@ export class Routes {
       this.log({ evt: "paid_request_retried", kind, payer, nonce, sameClient: same });
       return json(hit.status, same ? hit.body : redacted(hit.body), { ...hit.headers, "x-429-idempotent-replay": "true" });
     }
+    // refused params are never settled: nothing is charged
+    if (kind === "skip") await this.check(params, "skip");
 
     const run = async (): Promise<Cached> => {
       let tSettled = 0;
@@ -499,6 +518,7 @@ export class Routes {
     const { checkout, gate } = this;
     const body = await this.objectBody(req);
     const entry = this.tokenEntry(body.token);
+    await this.check(body, "use");
     const hook = this.serve;
     const st = await gate.use(entry.ticketId, hook ? (a) => hook(a, body) : undefined);
     const common = { ticketId: entry.ticketId, owner: entry.owner };

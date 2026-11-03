@@ -1,6 +1,6 @@
 {
   "name": "x429",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drop-in middleware that turns an API's 429s into a paid priority lane: callers pay (x402, USDC) to skip ahead, and everyone they pass is paid.",
   "license": "MIT",
   "type": "module",

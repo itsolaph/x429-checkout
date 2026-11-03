@@ -68,6 +68,7 @@ test("bad options fail with the option's name", () => {
   rejects({ ...base, maxSkipPrice: "abc" }, /maxSkipPrice must be a USDC amount/);
   rejects({ ...base, demoAgents: ["nope"] }, /demoAgents\[0\] must be an 0x address/);
   rejects({ ...base, serve: "yes" }, /serve must be a function/);
+  rejects({ ...base, validate: {} }, /validate must be a function/);
   rejects({ ...base, autoPayout: "1" }, /autoPayout must be true or false/);
   rejects({ ...base, logsRpcUrls: ["ftp://x"] }, /logsRpcUrls\[0\]/);
 });

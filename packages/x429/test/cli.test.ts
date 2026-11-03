@@ -36,7 +36,7 @@ test("usage errors exit 2 with a sentence; help and version exit 0", async () =>
   const help = await cli(["--help"]);
   assert.equal(help.code, 0);
   assert.match(help.out, /x429 deploy --rpc <url> --key-file <path>/);
-  assert.equal((await cli(["--version"])).out, "0.1.0");
+  assert.equal((await cli(["--version"])).out, "0.2.0");
   const noRpc = await cli(["deploy", "--key-file", "/tmp/nope"]);
   assert.equal(noRpc.code, 2);
   assert.match(noRpc.err, /--rpc is required/);

@@ -26,6 +26,15 @@ export type Capacity =
  */
 export type ServeHook = (admission: Admission, params: Record<string, unknown>) => unknown;
 
+/**
+ * Checks a request's params before anything is charged or answered: before the 402 skip offer and
+ * before a paid `/skip` settles, before `/use` builds an answer, and before a protected request with
+ * `X-429-Token` does. `params` are what the `serve` hook would get. Throw to refuse: a `CheckoutError`
+ * keeps its status and reason; any other error becomes a 400 `invalid_request` with its message.
+ * A refused paid `/skip` is not settled, so nothing is charged.
+ */
+export type ValidateHook = (params: Record<string, unknown>, ctx: { route: "skip" | "use" | "token" }) => void | Promise<void>;
+
 export type LogEntry = Record<string, unknown> & { evt?: string };
 
 export type X429Options = {
@@ -70,6 +79,8 @@ export type X429Options = {
   serveConfirm?: boolean;
   pollMs?: number;
   serve?: ServeHook;
+  /** Refuses bad params before a paid skip settles or an answer is built (see `ValidateHook`). */
+  validate?: ValidateHook;
   bazaar?: BazaarOptions;
   /** Addresses of your own filler agents (labeled `demo`; not served while only they wait). */
   demoAgents?: string[];
@@ -135,7 +146,7 @@ export class OptionsError extends Error {
 const KNOWN = new Set([
   "contract", "rpcUrl", "publicUrl", "capacity", "queueId", "operatorKey", "operatorKeyFile", "chainId", "usdc", "prefix",
   "explorer", "logsRpcUrls", "deployBlock", "dataDir", "admissionTtlMs", "slippageBps", "paymentTimeoutS", "quoteTtlS",
-  "suggestedSkipPrice", "maxSkipPrice", "autoPayout", "payoutIntervalMs", "serveConfirm", "pollMs", "serve", "bazaar",
+  "suggestedSkipPrice", "maxSkipPrice", "autoPayout", "payoutIntervalMs", "serveConfirm", "pollMs", "serve", "validate", "bazaar",
   "demoAgents", "holdDemoOnly", "legacyJoin", "joinsPerMinute", "descriptorExtras", "logger", "autoStart",
 ]);
 
@@ -264,6 +275,7 @@ export function resolveOptions(o: X429Options): { cfg: Config; operatorKey: Hex 
   if (!Array.isArray(demo)) fail("demoAgents must be an array of addresses");
   const demoAgents = new Set(demo.map((a, i) => addr(`demoAgents[${i}]`, a).toLowerCase()));
   if (o.serve !== undefined && typeof o.serve !== "function") fail("serve must be a function (admission, params) => answer");
+  if (o.validate !== undefined && typeof o.validate !== "function") fail("validate must be a function (params, ctx) => void");
   if (o.logger !== undefined && typeof o.logger !== "function") fail("logger must be a function");
   const extras = o.descriptorExtras ?? {};
   if (typeof extras !== "object" || extras === null || Array.isArray(extras)) fail("descriptorExtras must be an object");

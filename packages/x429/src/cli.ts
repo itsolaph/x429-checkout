@@ -22,7 +22,7 @@ import { chainFor, decodeRevert } from "./chain.ts";
 import { readOperatorKey } from "./config.ts";
 import { BASE_CHAIN_ID, BASE_USDC, USDC_EIP712, fmtUsd, usdc } from "./protocol.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 /** Native USDC by chain id. Other chains need --usdc. */
 export const KNOWN_USDC: Record<number, Address> = { [BASE_CHAIN_ID]: BASE_USDC };

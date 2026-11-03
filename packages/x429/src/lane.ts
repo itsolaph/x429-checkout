@@ -111,6 +111,7 @@ export class Lane extends EventEmitter {
       const entry = this.routes.tokenEntry(rawToken);
       const hook = this.serve;
       const params = Object.fromEntries(url.searchParams);
+      await this.routes.check(params, "token");
       const st = await gate.use(entry.ticketId, hook ? (a) => hook(a, params) : undefined);
       if (st.status === "used" && st.result !== undefined) return { action: "respond", ...json(200, st.result) };
       if (st.status === "ready") {
@@ -198,7 +199,7 @@ export async function x429(options: X429Options): Promise<Lane> {
   });
   const feed = new Feed({ rpcs: logsRpcs, chainId: cfg.chainId, contract: cfg.contract, queueId: cfg.queueId, fromBlock: cfg.deployBlock, dataDir, log });
   const payouts = new Payouts(checkout, feed, log);
-  const routes = new Routes({ checkout, gate, feed, log, payouts, serve: options.serve, bazaar });
+  const routes = new Routes({ checkout, gate, feed, log, payouts, serve: options.serve, validate: options.validate, bazaar });
   lane = new Lane({ cfg, client, checkout, gate, feed, payouts, routes, serve: options.serve });
   const l = lane;
   gate.onReject = (body) => {

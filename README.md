@@ -119,7 +119,7 @@ forge test --root contracts                                   # unit + fuzz + in
 FOUNDRY_PROFILE=offline forge test --root contracts           # without the fork tests (no network)
 npm run test:server                                           # x402 codec and quote math
 npm run typecheck                                             # tsc over server, agent-sim, scripts, web
-npm run test:x429                                             # the package: builds it, then 25 tests on a local anvil (no network)
+npm run test:x429                                             # the package: builds it, then 26 tests on a local anvil (no network)
 npm run build:x429 && npm run test:examples                   # the examples on an anvil fork of Base
 npm run e2e                                                   # full x402 flow + the plugin over stdio, on an anvil fork of Base
 npm run mcp:smoke                                             # legacy remote MCP server on the fork

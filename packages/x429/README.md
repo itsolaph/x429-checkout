@@ -71,6 +71,7 @@ npx x429 status --rpc <url> --contract <address> [--queue 1] [--json]
 | `usdc` | Base USDC | an EIP-3009 token with USDC's EIP-712 domain (`USD Coin`, `2`) |
 | `prefix` | `"/x429"` | where the routes are; `""` mounts them at the root |
 | `serve` | none | `(admission, params) => answer`: lets x429 answer a served ticket itself (see below) |
+| `validate` | none | `(params, { route }) => void`: refuses bad params before a paid skip settles or an answer is built (see below) |
 | `suggestedSkipPrice` | `"0.005"` | USDC; the skip price of a new ticket that posts none |
 | `maxSkipPrice` | `"0.1"` | USDC; the highest skip price a ticket may post |
 | `slippageBps` | `2000` | the 402 asks for the quoted cost + 20%; the unused part is refunded in the same transaction |
@@ -165,6 +166,13 @@ the same answer. `params` are the request's other fields (the body and query of 
 
 Without the hook, a served ticket's request goes through to your handler once, with `X-429-Token`
 (`decision.via === "token"`); a second use gets 410.
+
+With `validate: (params, { route }) => void`, the lane checks the same `params` first: before the
+402 skip offer and before a paid `/skip` settles (`route: "skip"`), before `/use` builds an answer
+(`"use"`), and before a protected request with `X-429-Token` does (`"token"`). Throw to refuse: a
+`CheckoutError(status, reason, message)` is answered with that status, any other error with 400
+`invalid_request` and its message. A paid skip whose params are refused is not settled, so the payer
+is not charged for a request your API would not answer; a refused `/use` leaves the ticket usable.
 
 ## How pricing and payouts work
 

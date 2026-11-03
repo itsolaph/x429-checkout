@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- New option `validate(params, { route })`: checks a request's params before anything is charged or
+  answered, that is before the 402 skip offer and before a paid `/skip` settles, before `/use` builds
+  an answer, and before a protected request with `X-429-Token` does. Throw a `CheckoutError` to refuse
+  with its status, or any error for a 400 `invalid_request`. A refused paid skip is not settled.
+  The `ValidateHook` type is exported. Without the option nothing changes.
+
 ## 0.1.0 (unreleased)
 
 First release: the engine of x429.lol as middleware.

@@ -4,8 +4,9 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { privateKeyToAccount } from "viem/accounts";
-import { x429, type Lane, type X429Options } from "x429";
-import { adapterApps, balance, KEYS, newQueue, pay, skipReason, startChain, type Apps, type Chain } from "./helpers.ts";
+import type { Address } from "viem";
+import { CheckoutError, x429, type Lane, type X429Options } from "x429";
+import { adapterApps, balance, KEYS, newQueue, pay, sign, skipReason, startChain, type Apps, type Chain } from "./helpers.ts";
 
 let chain: Chain;
 const open: { lane: Lane; apps: Apps }[] = [];
@@ -172,4 +173,55 @@ test("no serve hook: a served ticket's request goes through to the handler once,
   assert.equal(again.body.error, "used");
   await until(() => lane.gate.snapshotStats().inflight === 0);
   assert.equal((await call(`${apps.node}/api/data`)).status, 200, "the slot is free again");
+});
+
+test("validate: refused params are never charged or answered (402 offer, paid skip, /use, X-429-Token)", { skip: skipReason }, async () => {
+  const checked: string[] = [];
+  const { apps } = await laneOn(
+    {
+      capacity: { perIntervalMs: 60_000, admissionRoundMs: 60_000 },
+      serve: (_a, params) => ({ forecast: `rain in ${String(params.city)}` }),
+      validate: (params, ctx) => {
+        checked.push(ctx.route);
+        if (params.city === "Atlantis") throw new CheckoutError(422, "unknown_city", "no forecasts for Atlantis");
+        if (params.city === "") throw new Error("city must not be empty");
+      },
+    },
+    await newQueue(chain),
+  );
+  const waiting = privateKeyToAccount(KEYS[3]!);
+  const skipper = privateKeyToAccount(KEYS[4]!);
+  assert.equal((await pay(apps.node, "/x429/join", { skipPrice: "4000" }, waiting, 31337)).status, 200);
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${apps.express}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+
+  const refused = await post("/x429/skip", { target: 1, city: "Atlantis" });
+  assert.equal(refused.status, 422, "refused before the 402 offer");
+  assert.equal(((await refused.json()) as { error: string }).error, "unknown_city");
+  const plain = await post("/x429/skip", { target: 1, city: "" });
+  assert.equal(plain.status, 400);
+  assert.deepEqual(await plain.json(), { error: "invalid_request", message: "city must not be empty" });
+
+  // a payment signed for a good offer, sent with refused params: not settled, nothing charged
+  const offer = (await (await post("/x429/skip", { target: 1, city: "Paris" })).json()) as { accepts: { maxAmountRequired: string; asset: Address; payTo: Address; network: string }[] };
+  const req = offer.accepts[0]!;
+  const payload = await sign(skipper, 31337, req.asset, req.payTo, BigInt(req.maxAmountRequired));
+  const xPayment = Buffer.from(JSON.stringify({ x402Version: 1, scheme: "exact", network: req.network, payload })).toString("base64");
+  const before = await balance(chain, skipper.address);
+  const paidRefused = await post("/x429/skip", { target: 1, city: "Atlantis" }, { "x-payment": xPayment });
+  assert.equal(paidRefused.status, 422);
+  assert.equal(await balance(chain, skipper.address), before, "nothing charged");
+  const queue = (await (await fetch(`${apps.node}/x429/queue`)).json()) as { queue: { length: number } };
+  assert.equal(queue.queue.length, 1, "no ticket was created or moved");
+
+  const s = await pay(apps.hono, "/x429/skip", { target: 1, city: "Paris" }, skipper, 31337);
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  assert.deepEqual(s.body.result, { forecast: "rain in Paris" });
+  const badUse = await post("/x429/use", { token: s.body.token, city: "Atlantis" });
+  assert.equal(badUse.status, 422);
+  const goodUse = await post("/x429/use", { token: s.body.token, city: "Paris" });
+  assert.equal(goodUse.status, 200);
+  const viaHeader = await call(`${apps.node}/api/data?city=Atlantis`, { "x-429-token": s.body.token });
+  assert.equal(viaHeader.status, 422);
+  assert.ok(["skip", "use", "token"].every((r) => checked.includes(r)));
 });
