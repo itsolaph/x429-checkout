@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>x429 render: any page, after its JavaScript, as markdown or a PNG</title>
+    <meta name="description" content="Send a URL, get the page back after a real Chromium ran its JavaScript, as markdown or a PNG. Two pages at a time; when both are busy, wait in line for free or pay a cent to go first, and the agents you pass get paid." />
+    <meta name="theme-color" content="#FBFBF9" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23E4432D' d='M3 6h26v6.5a3.5 3.5 0 0 0 0 7V26H3v-6.5a3.5 3.5 0 0 0 0-7z'/%3E%3Ctext x='16' y='20.5' text-anchor='middle' font-family='Arial Narrow,Arial,sans-serif' font-weight='700' font-size='12' fill='%23FBFBF9'%3E429%3C/text%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap" />
+    <style>
+      /* Same tokens as the x429.lol ticket roll: paper, ink, ticket red for the line, paid green for money. */
+      :root {
+        --paper: oklch(98.6% 0.003 100);
+        --ink: oklch(20.6% 0.008 286);
+        --ink-2: oklch(47.8% 0.013 286);
+        --rule: oklch(91.4% 0.007 106);
+        --ticket: oklch(61.5% 0.201 31);
+        --paid: oklch(62.9% 0.155 154);
+        --font: "Archivo", "Archivo Fallback", sans-serif;
+        --mono: "IBM Plex Mono", ui-monospace, monospace;
+      }
+      * { box-sizing: border-box; }
+      html { background: var(--paper); color: var(--ink); -webkit-text-size-adjust: 100%; }
+      body { margin: 0; font-family: var(--font); font-size: 17px; line-height: 1.55; font-variant-numeric: tabular-nums; }
+      h1, h2, p, dl, dd, ul { margin: 0; }
+      ul { padding: 0; list-style: none; }
+      a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 4px; text-decoration-color: color-mix(in oklch, var(--ink) 40%, transparent); }
+      a:hover { text-decoration-color: var(--ink); }
+      :focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; border-radius: 4px; }
+      code, pre { font-family: var(--mono); font-size: 0.86em; }
+
+      .page { max-width: 1120px; margin: 0 auto; padding: 0 32px 64px; }
+      .top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 20px 0 0; }
+      .brand { color: var(--ink-2); font-size: 16px; }
+      .brand b { color: var(--ink); font-size: 24px; font-weight: 800; font-stretch: 70%; margin-right: 4px; }
+      .top nav { display: flex; gap: 20px; font-size: 16px; }
+
+      .hero { padding: 48px 0 40px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px 48px; align-items: end; }
+      h1 {
+        grid-column: 1 / -1;
+        font-size: clamp(56px, 10.5vw, 136px);
+        line-height: 0.88;
+        font-weight: 800;
+        font-stretch: 64%;
+        letter-spacing: -0.01em;
+        text-wrap: balance;
+      }
+      .lede { font-size: 21px; line-height: 1.4; max-width: 34ch; }
+
+      /* The two render slots, as tickets off the roll: red while a page is rendering. */
+      .slots { display: flex; gap: 10px; align-items: center; }
+      .slot {
+        width: 112px; height: 56px; display: grid; place-items: center;
+        font-weight: 700; font-stretch: 75%; font-size: 15px; color: var(--ink-2);
+        background: var(--paper);
+        border: 1.5px dashed color-mix(in oklch, var(--ink) 35%, transparent);
+        border-radius: 8px;
+        -webkit-mask: radial-gradient(circle 9px at 0 50%, #0000 98%, #000) left / 51% 100% no-repeat, radial-gradient(circle 9px at 100% 50%, #0000 98%, #000) right / 51% 100% no-repeat;
+                mask: radial-gradient(circle 9px at 0 50%, #0000 98%, #000) left / 51% 100% no-repeat, radial-gradient(circle 9px at 100% 50%, #0000 98%, #000) right / 51% 100% no-repeat;
+        transition: background-color 160ms ease-out, color 160ms ease-out;
+      }
+      .slot.busy { background: var(--ticket); border-color: var(--ticket); color: var(--paper); }
+      .slots-note { grid-column: 2; color: var(--ink-2); font-size: 15px; min-height: 1.5em; }
+
+      section { border-top: 1px solid var(--rule); padding: 36px 0; display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px 48px; }
+      h2 { font-size: 30px; line-height: 1.05; font-weight: 750; font-stretch: 72%; text-wrap: balance; }
+      .body { max-width: 68ch; display: grid; gap: 16px; }
+      .muted { color: var(--ink-2); }
+
+      pre {
+        margin: 0; padding: 18px 20px; overflow-x: auto;
+        background: color-mix(in oklch, var(--ink) 4%, var(--paper));
+        border: 1px solid var(--rule); border-radius: 10px;
+        line-height: 1.6; white-space: pre;
+      }
+      .req { color: var(--ink); }
+      .res { color: var(--ink-2); }
+      .st429 { color: var(--ticket); font-weight: 500; }
+      .st200 { color: var(--paid); font-weight: 500; }
+
+      dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 28px; }
+      dt { font-weight: 650; }
+      dd { color: var(--ink); }
+      .params li { padding: 2px 0; }
+      .params code { color: var(--ink); }
+
+      footer { border-top: 1px solid var(--rule); padding-top: 24px; color: var(--ink-2); font-size: 15px; display: flex; flex-wrap: wrap; gap: 8px 24px; }
+
+      @media (max-width: 760px) {
+        .page { padding: 0 20px 48px; }
+        .hero { grid-template-columns: 1fr; padding-top: 32px; }
+        .slots-note { grid-column: 1; }
+        section { grid-template-columns: 1fr; }
+        dl { grid-template-columns: 1fr; gap: 2px; }
+        dd { margin-bottom: 10px; }
+        .top nav { gap: 14px; }
+        pre { font-size: 12px; padding: 14px 14px; }
+      }
+      @media (prefers-reduced-motion: reduce) { .slot { transition: none; } }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="top">
+        <p class="brand"><b>x429</b> render</p>
+        <nav aria-label="Elsewhere">
+          <a href="https://x429.lol">x429.lol</a>
+          <a href="https://www.npmjs.com/package/x429">npm package</a>
+          <a href="https://github.com/itsolaph/x429-checkout/tree/main/apps/render">Source</a>
+        </nav>
+      </header>
+
+      <main>
+        <div class="hero">
+          <h1>Any page, after its JavaScript.</h1>
+          <p class="lede">Send a URL. A real Chromium loads it, runs its scripts, and you get the page back as clean markdown or a PNG.</p>
+          <div class="slots" role="img" aria-label="Two render slots" id="slots">
+            <span class="slot" id="slot-1">Page 1</span>
+            <span class="slot" id="slot-2">Page 2</span>
+          </div>
+          <p class="slots-note" id="slots-note" aria-live="polite">Two pages render at a time.</p>
+        </div>
+
+        <section aria-labelledby="try">
+          <h2 id="try">Try it</h2>
+          <div class="body">
+            <pre><span class="req">curl 'https://render.x429.lol/v1/render?url=https://example.com'</span>
+<span class="res">{
+  "format": "markdown",
+  "url": "https://example.com",
+  "finalUrl": "https://example.com/",
+  "title": "Example Domain",
+  "status": 200,
+  "markdown": "# Example Domain\n\nThis domain is for use in ...",
+  "bytes": 214,
+  "truncated": false,
+  "renderedMs": 912
+}</span></pre>
+            <ul class="params">
+              <li><code>url</code> an http or https address, required</li>
+              <li><code>format</code> <code>markdown</code> (JSON, the default) or <code>png</code> (an image)</li>
+              <li><code>wait</code> extra milliseconds after the page loads, 0 to 5000, default 800</li>
+              <li><code>full</code> <code>1</code> for a full-page PNG instead of the first screen</li>
+            </ul>
+          </div>
+        </section>
+
+        <section aria-labelledby="busy">
+          <h2 id="busy">When both pages are busy</h2>
+          <div class="body">
+            <p>You get a <code>429</code> that tells you where you would be in line and what going first costs right now. Then you choose:</p>
+            <pre><span class="req">GET  /v1/render?url=…</span>
+     <span class="st429">429</span> <span class="res">#2 in line, skip to #1 for $0.0103</span>
+<span class="req">POST /x429/skip {"target":1,"url":"…"}</span>
+     <span class="res">402 pay with x402, USDC on Base</span>
+<span class="req">POST /x429/skip + payment</span>
+     <span class="st200">200</span> <span class="res">your render and a receipt</span></pre>
+            <p>Each agent you pass is paid its own asking price, a cent by default, sent to its wallet by the operator. Or wait for free: <code>POST /x429/join</code> takes a ticket, and <code>POST /x429/use</code> with its token answers with your position until you are served, then with your render.</p>
+            <p class="muted">No API keys and no accounts. Payments use <a href="https://x402.org">x402</a>; any x402 client can pay, for example the <a href="https://x429.lol">PayBox plugin</a>. The line, prices and routes are described at <a href="/x429"><code>/x429</code></a>.</p>
+          </div>
+        </section>
+
+        <section aria-labelledby="limits">
+          <h2 id="limits">Limits</h2>
+          <dl class="body">
+            <dt>Free renders</dt><dd>30 an hour per address. Renders through the line, waited for or paid, do not count.</dd>
+            <dt>Time</dt><dd>20 seconds per render, everything included.</dd>
+            <dt>Size</dt><dd>5 MB fetched per render; past that, further requests are dropped. Markdown is cut at 200 KB with <code>"truncated": true</code>. PNGs are 1280×800, or up to 1280×8000 with <code>full=1</code>.</dd>
+            <dt>Not fetched</dt><dd>Private and local networks (also through redirects and from inside a page), ports other than 80 and 443, pages whose robots.txt closes them to <code>x429-render</code>, video, audio and web fonts, WebSockets, and anything a page sends other than GET and HEAD.</dd>
+            <dt>Redirects</dt><dd>Two for the page itself.</dd>
+          </dl>
+        </section>
+
+        <section aria-labelledby="terms">
+          <h2 id="terms">Terms</h2>
+          <div class="body">
+            <p>The service is provided as is, with no uptime promise. Render only what you may fetch. Every render starts in a fresh browser with no cookies or storage, and its user agent says <code>x429-render</code>.</p>
+            <p>Logs keep the host and path of each render, never the query string. Payments settle on Base in the operator's X429Checkout contract and are final; the contract is not audited.</p>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <span>Built on <a href="https://www.npmjs.com/package/x429">x429</a>, the middleware behind <a href="https://x429.lol">x429.lol</a>.</span>
+        <a href="https://github.com/itsolaph/x429-checkout">MIT, on GitHub</a>
+      </footer>
+    </div>
+    <script>
+      // The two slots, live: red while a page is rendering. Quietly does nothing if /healthz is unreachable.
+      (() => {
+        const slots = [document.getElementById("slot-1"), document.getElementById("slot-2")];
+        const note = document.getElementById("slots-note");
+        let line = null;
+        const tick = async () => {
+          try {
+            const h = await (await fetch("/healthz", { cache: "no-store" })).json();
+            const busy = Math.min(h.slots.busy, slots.length);
+            slots.forEach((s, i) => s.classList.toggle("busy", i < busy));
+            if (line === null || Date.now() - line.at > 15000) {
+              const d = await (await fetch("/x429", { cache: "no-store" })).json().catch(() => null);
+              line = { at: Date.now(), length: d && typeof d.queueLength === "number" ? d.queueLength : null };
+            }
+            const waiting = line.length ? `, ${line.length} waiting in line` : "";
+            note.textContent = busy === 0 ? `Both pages are free right now${waiting}.` : busy === 1 ? `One page is rendering${waiting}.` : `Both pages are rendering${waiting}.`;
+          } catch {
+            // keep the static text
+          }
+        };
+        tick();
+        setInterval(tick, 3000);
+      })();
+    </script>
+  </body>
+</html>

@@ -6,6 +6,7 @@ node_modules/
 .data/
 .e2e/
 .e2e-mcp/
+.e2e-render/
 *.log
 
 contracts/out/
@@ -14,7 +15,7 @@ contracts/broadcast/
 /cache/
 
 # built dashboard
-site/
+/site/
 
 # x429 package build output and env templates
 packages/*/dist/
