@@ -1,0 +1,26 @@
+{
+  "name": "x429-render",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "render.x429.lol: a URL in, the page after a real Chromium ran its JavaScript out (markdown or PNG), behind an x429 lane",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.15",
+    "playwright-core": "1.64.1",
+    "turndown": "7.2.4",
+    "x429": "*"
+  },
+  "devDependencies": {
+    "@types/turndown": "5.0.6"
+  }
+}

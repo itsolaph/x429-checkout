@@ -20,7 +20,9 @@
     "mcp:smoke": "bash scripts/mcp-smoke.sh",
     "build:x429": "npm run build -w x429",
     "test:x429": "npm test -w x429",
-    "test:examples": "node --test examples/smoke.test.ts"
+    "test:examples": "node --test examples/smoke.test.ts",
+    "test:render": "npm test -w x429-render",
+    "render": "npm start -w x429-render"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
@@ -35,6 +37,7 @@
   },
   "workspaces": [
     "packages/*",
-    "examples/*"
+    "examples/*",
+    "apps/*"
   ]
 }
