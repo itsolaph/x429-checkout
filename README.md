@@ -50,6 +50,25 @@ Running in production: [x429.lol](https://x429.lol) (demo) and [render.x429.lol]
 This is v0.3. v0.2 (gasless EIP-712 joins and claims, EIP-191 redeem, a remote MCP server) is still in
 the contract and the server as a legacy path; the plugin does not depend on it.
 
+## Who said the agent could spend?
+
+Speed isn't the hard part of agent payments. Authority is: who approved the spend, how far it
+can go, and what's left to check afterwards. x429 answers all three on every skip:
+
+- **A person approves each payment.** The agent only ever gets an x402 proposal. Nothing moves
+  until the user approves it with a passkey in PayBox. The plugin can't sign, and it never sees a key.
+- **The approval has a hard ceiling and a short life.** Each proposal names one URL, one maximum
+  amount (the live price plus a 20% buffer) and expires within 5 minutes. If the line moves past
+  the ceiling, the skip fails instead of charging more.
+- **Unused authority goes back.** Whatever the skip didn't need is refunded in the same
+  transaction. A retried request with the same authorization is answered again, never charged twice.
+- **Every spend is on the record.** The paid response carries a receipt: who paid, what position
+  they bought, which tickets were passed and what each was paid. The same facts are events on
+  Base, so anyone can audit them without trusting the operator.
+
+x429 doesn't try to be an identity system. The wallet approval is the permission, the contract
+is the audit log, and the API owner gets paid priority without holding anyone's keys.
+
 ## How it works
 
 ```
